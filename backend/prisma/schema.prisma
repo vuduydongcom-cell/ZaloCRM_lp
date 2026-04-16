@@ -67,6 +67,7 @@ model User {
   appointments     Appointment[]
   repliedMessages  Message[]           @relation("RepliedMessages")
   activityLogs     ActivityLog[]
+  messageTemplates MessageTemplate[]
 
   @@map("users")
 }
@@ -117,6 +118,7 @@ model Contact {
   phone            String?
   email            String?   @map("email")
   fullName         String?   @map("full_name")
+  crmName          String?   @map("crm_name")
   avatarUrl        String?   @map("avatar_url")
   source           String?   // FB, TT, GT, CN, etc.
   sourceDate       DateTime? @map("source_date")
@@ -157,6 +159,7 @@ model Conversation {
   lastMessageAt    DateTime? @map("last_message_at")
   unreadCount      Int       @default(0) @map("unread_count")
   isReplied        Boolean   @default(true) @map("is_replied")
+  tab              String    @default("main") @map("tab") // main, other
   createdAt        DateTime  @default(now()) @map("created_at")
 
   org           Organization  @relation(fields: [orgId], references: [id], onDelete: Cascade)
@@ -166,6 +169,9 @@ model Conversation {
   aiSuggestions AiSuggestion[]
 
   @@unique([zaloAccountId, externalThreadId])
+  @@index([orgId, zaloAccountId, isReplied, lastMessageAt])
+  @@index([orgId, zaloAccountId, lastMessageAt])
+  @@index([orgId, tab, lastMessageAt])
   @@map("conversations")
 }
 
@@ -189,6 +195,7 @@ model Message {
   conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   repliedBy    User?        @relation("RepliedMessages", fields: [repliedByUserId], references: [id])
 
+  @@unique([conversationId, zaloMsgId])
   @@map("messages")
 }
 
@@ -352,16 +359,19 @@ model AutomationRule {
 }
 
 model MessageTemplate {
-  id        String   @id @default(uuid())
-  orgId     String   @map("org_id")
-  name      String
-  content   String
-  category  String?
-  createdAt DateTime @default(now()) @map("created_at")
-  updatedAt DateTime @updatedAt @map("updated_at")
+  id          String   @id @default(uuid())
+  orgId       String   @map("org_id")
+  ownerUserId String?  @map("owner_user_id")
+  name        String
+  content     String
+  category    String?
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
 
-  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  org   Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  owner User?        @relation(fields: [ownerUserId], references: [id])
 
+  @@index([orgId, ownerUserId])
   @@index([orgId, category])
   @@map("message_templates")
 }
