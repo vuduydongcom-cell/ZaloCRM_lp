@@ -304,7 +304,29 @@ export function useChat() {
     } catch {
       // Ignore mark-read errors
     }
+    // Auto-sync Zalo profile (gender/birth/phone/avatar) khi contact thiếu data.
+    // Chỉ fire-and-forget; user không phải đợi.
+    void autoSyncZaloProfile(convId);
     await Promise.allSettled([generateAiSummary(), generateAiSentiment(), fetchAiUsage()]);
+  }
+
+  /** Fetch Zalo profile để fill các field còn null (gender/birthDate/phone/avatar). */
+  async function autoSyncZaloProfile(convId: string) {
+    const conv = conversations.value.find(c => c.id === convId);
+    const c = conv?.contact;
+    if (!c?.zaloUid) return;
+    // Chỉ sync khi missing 1 trong 4 field. Tránh gọi API thừa.
+    const needSync = !c.gender || !c.birthDate || !c.phone || !c.avatarUrl;
+    if (!needSync) return;
+    try {
+      const res = await api.post(`/contacts/${c.id}/sync-zalo-profile`);
+      if (res.data?.updated && res.data?.contact && conv) {
+        conv.contact = res.data.contact;
+      }
+    } catch (err) {
+      // Silent fail: KH không phải friend của nick nào, hoặc profile riêng tư
+      console.debug('[zalo-profile-sync]', (err as Error)?.message);
+    }
   }
 
   async function sendMessage(content: string, replyMessageId?: string | null) {
@@ -338,6 +360,25 @@ export function useChat() {
       if (data.conversationId === selectedConvId.value) {
         if (!messages.value.find(m => m.id === data.message.id)) {
           messages.value.push(normalizeMessage(data.message as RawMessage));
+        }
+      }
+      // Live bump số tin in/out + lastMessageAt cho conv tương ứng (optimistic
+      // update — fetchConversations chạy parallel sẽ correct lại từ DB sau).
+      const conv = conversations.value.find(c => c.id === data.conversationId);
+      if (conv) {
+        if (conv.contact) {
+          if (data.message.senderType === 'self') {
+            conv.contact.totalOutbound = (conv.contact.totalOutbound ?? 0) + 1;
+            conv.contact.lastOutboundAt = data.message.sentAt;
+          } else {
+            conv.contact.totalInbound = (conv.contact.totalInbound ?? 0) + 1;
+            conv.contact.lastInboundAt = data.message.sentAt;
+          }
+          conv.contact.lastActivity = data.message.sentAt;
+        }
+        conv.lastMessageAt = data.message.sentAt;
+        if (data.message.senderType !== 'self' && conv.id !== selectedConvId.value) {
+          conv.unreadCount = (conv.unreadCount ?? 0) + 1;
         }
       }
       fetchConversations();
