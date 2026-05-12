@@ -199,7 +199,7 @@ const emit = defineEmits<{
 }>();
 
 const SPECIAL_TYPES = new Set([
-  'bank_transfer', 'call', 'qr_code', 'reminder', 'poll', 'note', 'forwarded', 'rich', 'location',
+  'bank_transfer', 'call', 'qr_code', 'reminder', 'poll', 'note', 'forwarded', 'rich', 'location', 'link',
 ]);
 
 function isSpecialType(contentType: string | null | undefined): boolean {
@@ -212,6 +212,11 @@ function parseContent(content: string | null): unknown {
 }
 
 function getImageUrl(msg: Message): string | null {
+  // Skip link preview / QR / sticker / reminder / call — không render thumb như chat-image,
+  // chúng có renderer riêng (link-preview-card, qr-card, special-message-renderer, ...)
+  if (msg.contentType && ['link', 'qr_code', 'sticker', 'reminder', 'call', 'contact_card'].includes(msg.contentType)) {
+    return null;
+  }
   if (msg.contentType === 'image' && msg.content) {
     if (msg.content.startsWith('http')) return msg.content;
     try {
@@ -320,7 +325,20 @@ const messageCaption = computed<string>(() => {
 const formattedCaption = computed(() => highlightText(messageCaption.value));
 
 // ── Sticker / Video / Voice / GIF helpers ───────────────────────────────────
-const stickerUrl = computed(() => extractMediaUrl('sticker', props.message.content));
+// Zalo sticker content shape: { id, catId, type } — KHÔNG có URL, phải tự build
+// từ Zalo CDN. Fallback về extractMediaUrl nếu (hiếm) Zalo lưu URL trực tiếp.
+const stickerUrl = computed(() => {
+  const p = safeParse(props.message.content);
+  if (p && typeof p === 'object') {
+    const id = (p as Record<string, unknown>).id;
+    const catId = (p as Record<string, unknown>).catId;
+    if (id && catId) {
+      // Zalo CDN sticker — đa số sticker là webp
+      return `https://zalo-api.zadn.vn/api/emoticon/sticker/webpc?stickerId=${id}&categoryId=${catId}&type=${(p as Record<string, unknown>).type || 0}`;
+    }
+  }
+  return extractMediaUrl('sticker', props.message.content);
+});
 const gifUrl = computed(() => extractMediaUrl('gif', props.message.content));
 const voiceUrl = computed(() => extractMediaUrl('voice', props.message.content));
 

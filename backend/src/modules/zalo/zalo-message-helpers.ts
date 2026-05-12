@@ -49,8 +49,22 @@ export function detectContentType(msgType: string | undefined, content: any): st
       // rtf = rich-text-format (bot Smax/Zalo gửi) — vẫn rich
       if (action === 'msginfo.actionlist') return 'reminder';
     }
+    // QR Code (VietQR/bank): description chứa JSON string với key qrCodeUrl
+    // Zalo lưu dưới contact_card variant — detect bằng content shape thay vì msgType
+    if (typeof content.description === 'string' && content.description.includes('qrCodeUrl')) {
+      return 'qr_code';
+    }
     if (content.bankCode || content.bankName) return 'bank_transfer';
     if (content.callDuration !== undefined || content.callType) return 'call';
+    // Link auto-unfurl: có thumb + href + action rỗng (không phải reminder/call/bank)
+    // Zalo msgType cho link đôi khi chỉ là 'webchat' hoặc rỗng → detect bằng shape
+    if (
+      typeof content.href === 'string' && content.href.startsWith('http') &&
+      (typeof content.thumb === 'string' || typeof content.title === 'string') &&
+      !action
+    ) {
+      return 'link';
+    }
 
     // Log unknown types for analysis before returning rich
     if (!KNOWN_MSG_TYPE_PATTERNS.some((p) => msgType.includes(p))) {

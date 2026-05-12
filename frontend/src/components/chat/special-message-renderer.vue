@@ -24,11 +24,23 @@
       </div>
     </div>
 
-    <!-- QR Code -->
-    <v-card v-else-if="type === 'qr_code'" variant="outlined" class="pa-3 text-center" rounded="lg" style="max-width: 140px;">
-      <v-icon icon="mdi-qrcode" size="48" color="primary" />
-      <div class="text-caption mt-1">Mã QR</div>
-    </v-card>
+    <!-- QR Code: render ảnh QR thật từ content.description (Zalo lưu JSON string ở đó) -->
+    <a
+      v-else-if="type === 'qr_code'"
+      :href="qrImageUrl || '#'"
+      target="_blank"
+      rel="noopener"
+      class="qr-card"
+    >
+      <img v-if="qrImageUrl" :src="qrImageUrl" alt="QR Code" class="qr-image" />
+      <div v-else class="qr-fallback">
+        <v-icon icon="mdi-qrcode" size="48" color="primary" />
+      </div>
+      <div class="qr-label">
+        <v-icon size="14" class="mr-1">mdi-qrcode</v-icon>
+        {{ title || 'Mã QR' }}
+      </div>
+    </a>
 
     <!-- Reminder / Calendar -->
     <v-card v-else-if="type === 'reminder'" variant="tonal" color="warning" class="pa-3" rounded="lg">
@@ -97,6 +109,24 @@
         <div class="location-coords">{{ locationCoords.lat.toFixed(5) }}, {{ locationCoords.lng.toFixed(5) }}</div>
       </div>
     </div>
+
+    <!-- Link preview — card 2 cột với thumb + title/desc/domain -->
+    <a
+      v-else-if="type === 'link' && richHref"
+      :href="richHref"
+      target="_blank"
+      rel="noopener"
+      class="link-preview-card"
+    >
+      <img v-if="richThumb" :src="richThumb" :alt="title || 'preview'" class="link-thumb" />
+      <div class="link-meta">
+        <div v-if="title" class="link-title">{{ title }}</div>
+        <div v-if="linkDescription" class="link-desc">{{ linkDescription }}</div>
+        <div v-if="linkDomain" class="link-domain">
+          <v-icon size="11">mdi-link-variant</v-icon> {{ linkDomain }}
+        </div>
+      </div>
+    </a>
 
     <!-- Generic rich content — best-effort render -->
     <div v-else class="rich-card">
@@ -386,6 +416,29 @@ const locationIsLive = computed<boolean>(() => {
   const p = paramsObj.value;
   return Number(p?.isUserLocation || 0) === 1;
 });
+
+// ── QR Code ───────────────────────────────────────────────────────────────
+// Zalo lưu qrCodeUrl trong content.description (JSON string), không phải plain text
+const qrImageUrl = computed<string>(() => {
+  const desc = props.content?.description;
+  if (typeof desc !== 'string') return String(props.content?.qrCodeUrl || '');
+  try {
+    const parsed = JSON.parse(desc);
+    return String(parsed?.qrCodeUrl || '');
+  } catch { return ''; }
+});
+
+// ── Link preview ─────────────────────────────────────────────────────────
+// Domain hiển thị nhỏ ở footer card
+const linkDomain = computed<string>(() => {
+  try {
+    return new URL(richHref.value).hostname.replace(/^www\./, '');
+  } catch { return ''; }
+});
+const linkDescription = computed<string>(() => {
+  const d = props.content?.description;
+  return typeof d === 'string' ? d.trim() : '';
+});
 </script>
 
 <style scoped>
@@ -597,5 +650,92 @@ const locationIsLive = computed<boolean>(() => {
   color: var(--smax-grey-500, #9e9e9e);
   font-family: monospace;
   margin-top: 4px;
+}
+
+/* QR Code card */
+.qr-card {
+  display: block;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid var(--smax-grey-200, #e0e0e0);
+  border-radius: 12px;
+  overflow: hidden;
+  background: white;
+  max-width: 220px;
+  transition: box-shadow 0.15s ease;
+}
+.qr-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+.qr-image {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #f5f5f5;
+}
+.qr-fallback {
+  padding: 40px;
+  text-align: center;
+  background: #f5f5f5;
+}
+.qr-label {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--smax-grey-700);
+  display: flex; align-items: center;
+  background: rgba(0,0,0,0.02);
+  border-top: 1px solid var(--smax-grey-200);
+}
+
+/* Link preview card */
+.link-preview-card {
+  display: flex;
+  text-decoration: none;
+  color: inherit;
+  border: 1px solid var(--smax-grey-200, #e0e0e0);
+  border-radius: 12px;
+  overflow: hidden;
+  background: white;
+  max-width: 320px;
+  transition: box-shadow 0.15s ease;
+}
+.link-preview-card:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.08); }
+.link-thumb {
+  width: 80px;
+  height: 80px;
+  flex-shrink: 0;
+  object-fit: cover;
+  background: #e9eef3;
+}
+.link-meta {
+  padding: 8px 10px;
+  display: flex; flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  flex: 1;
+}
+.link-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #212121;
+  line-height: 1.3;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.link-desc {
+  font-size: 11px;
+  color: var(--smax-grey-700);
+  line-height: 1.3;
+  margin-top: 2px;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.link-domain {
+  font-size: 10px;
+  color: var(--smax-primary, #2962ff);
+  margin-top: 4px;
+  display: flex; align-items: center; gap: 2px;
 }
 </style>
