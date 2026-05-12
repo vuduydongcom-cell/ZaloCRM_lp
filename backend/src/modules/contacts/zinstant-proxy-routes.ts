@@ -289,22 +289,47 @@ export async function zinstantProxyRoutes(app: FastifyInstance): Promise<void> {
       const profile = profiles[uid] || profiles[`${uid}_0`];
       if (!profile) return reply.status(404).send({ error: 'user not found' });
 
-      // Normalize fields cho frontend dễ dùng
+      // Normalize fields — full Zalo getUserInfo response shape
+      const bizPkgRaw = profile.bizPkg as Record<string, unknown> | null | undefined;
       const data = {
         uid: String(uid),
-        zaloName: String(profile.zaloName || profile.zalo_name || profile.displayName || profile.display_name || ''),
+        userId: String(profile.userId || uid),
+        username: String(profile.username || ''), // Zalo handle (t_xxx)
+        globalId: String(profile.globalId || ''),
+        zaloName: String(profile.zaloName || profile.zalo_name || ''),
+        displayName: String(profile.displayName || profile.display_name || profile.zaloName || ''),
         avatar: String(profile.avatar || ''),
         avatarBig: String(profile.avatarBig || profile.avatar || ''),
-        gender: Number(profile.gender ?? -1),
-        dob: profile.dob || profile.sdob || null,
+        bgavatar: String(profile.bgavatar || ''),
+        coverPhoto: String(profile.cover || profile.coverPhoto || ''),
+        gender: Number(profile.gender ?? -1), // 0=Nam, 1=Nữ
+        dob: profile.dob || null,
         sdob: profile.sdob || null,
         phoneNumber: String(profile.phoneNumber || ''),
-        bizPkg: profile.bizPkg || null,
-        coverPhoto: String(profile.cover || profile.coverPhoto || ''),
-        status: String(profile.status || ''),
-        isFr: profile.isFr ?? 0, // 1 = friend
-        type: profile.type ?? 0,
-        userId: String(profile.userId || uid),
+        status: String(profile.status || ''), // Bio/status text user tự đặt
+        // Trạng thái KB + active state
+        isFr: Number(profile.isFr ?? 0),
+        isBlocked: Number(profile.isBlocked ?? 0),
+        isActive: Number(profile.isActive ?? 0),
+        isActivePC: Number(profile.isActivePC ?? 0),
+        isActiveWeb: Number(profile.isActiveWeb ?? 0),
+        isValid: Number(profile.isValid ?? 0),
+        // Thời gian (epoch ms)
+        lastActionTime: Number(profile.lastActionTime ?? 0),
+        lastUpdateTime: Number(profile.lastUpdateTime ?? 0),
+        // Account meta
+        type: Number(profile.type ?? 0),
+        accountStatus: Number(profile.accountStatus ?? 0),
+        userMode: Number(profile.user_mode ?? profile.userMode ?? 0),
+        // Biz/OA info
+        bizPkg: bizPkgRaw ? {
+          label: bizPkgRaw.label ?? null,
+          pkgId: Number(bizPkgRaw.pkgId ?? 0),
+          createdTs: Number(bizPkgRaw.createdTs ?? 0),
+        } : null,
+        isExtensionAccount: Number(profile.isExtensionAccount ?? 0),
+        oaInfo: profile.oaInfo ?? null,
+        oaStatus: profile.oa_status ?? profile.oaStatus ?? null,
       };
       userInfoCache.set(uid, { data, expiresAt: Date.now() + USER_INFO_TTL_MS });
       return reply.header('Cache-Control', 'private, max-age=600').send(data);
