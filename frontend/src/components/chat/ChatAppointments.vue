@@ -93,12 +93,12 @@
       </v-btn>
     </div>
 
-    <!-- Appointment list — sorted upcoming first, source badge per row -->
+    <!-- Appointment list — overdue trên cùng, scheduled middle, done bottom -->
     <div
       v-for="apt in sortedAppointments"
       :key="apt.id"
       class="apt-row"
-      :class="{ past: isPast(apt) }"
+      :class="aptRowClass(apt)"
     >
       <div v-if="editingId !== apt.id">
         <!-- Row 1: source badge + status -->
@@ -372,22 +372,36 @@ function isPresetActive(preset: Preset): boolean {
   );
 }
 
+// Thứ tự hiển thị (final):
+//   1. OVERDUE (cảnh báo, border đỏ) — TOP, sắp xếp quá hạn gần nhất lên trước
+//   2. SCHEDULED (chờ diễn ra, border vàng) — middle, gần đến giờ lên đầu
+//   3. COMPLETED/CANCELLED/NO_SHOW (đã chốt outcome, border xám) — BOTTOM
 const sortedAppointments = computed(() => {
-  // Sắp xếp: chưa qua trước (gần nhất lên đầu), đã qua sau (gần nhất lên đầu)
-  const now = Date.now();
-  const upcoming: Appointment[] = [];
-  const past: Appointment[] = [];
+  const overdue: Appointment[] = [];
+  const scheduled: Appointment[] = [];
+  const done: Appointment[] = [];
   for (const a of props.appointments) {
-    if (new Date(a.appointmentDate).getTime() >= now) upcoming.push(a);
-    else past.push(a);
+    if (a.status === 'overdue') overdue.push(a);
+    else if (a.status === 'scheduled') scheduled.push(a);
+    else done.push(a); // completed | cancelled | no_show
   }
-  upcoming.sort((a, b) => new Date(a.appointmentDate).getTime() - new Date(b.appointmentDate).getTime());
-  past.sort((a, b) => new Date(b.appointmentDate).getTime() - new Date(a.appointmentDate).getTime());
-  return [...upcoming, ...past];
+  // Overdue: quá hạn gần nhất (sát now) lên trên — dễ action
+  overdue.sort((a, b) => new Date(b.appointmentDate).getTime() - new Date(a.appointmentDate).getTime());
+  // Scheduled: gần đến giờ nhất lên đầu
+  scheduled.sort((a, b) => new Date(a.appointmentDate).getTime() - new Date(b.appointmentDate).getTime());
+  // Done: gần nhất (vừa close) lên trước
+  done.sort((a, b) => {
+    const ta = a.statusChangedAt ? new Date(a.statusChangedAt).getTime() : new Date(a.appointmentDate).getTime();
+    const tb = b.statusChangedAt ? new Date(b.statusChangedAt).getTime() : new Date(b.appointmentDate).getTime();
+    return tb - ta;
+  });
+  return [...overdue, ...scheduled, ...done];
 });
 
-function isPast(apt: Appointment): boolean {
-  return new Date(apt.appointmentDate).getTime() < Date.now();
+function aptRowClass(apt: Appointment): string {
+  if (apt.status === 'overdue') return 'apt-overdue';
+  if (apt.status === 'completed' || apt.status === 'cancelled' || apt.status === 'no_show') return 'apt-done';
+  return ''; // scheduled = default warning border
 }
 
 function statusColor(s: string): string {
@@ -405,13 +419,32 @@ function statusLabel(s: string): string {
   return statusOptions.find(o => o.value === s)?.title || s;
 }
 
+// Hiển thị ngày kiểu thân thiện: Hôm qua / Hôm nay / Ngày mai / Ngày mốt → trong list này,
+// quá list (3-6 ngày) thì Thứ X (Thứ 2..CN), >6 ngày thì dd/mm/yyyy
 function formatAptDate(d: string): string {
-  return new Date(d).toLocaleDateString('vi-VN', {
-    weekday: 'short',
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-  });
+  const dt = new Date(d);
+  const dateOnly = new Date(dt.getFullYear(), dt.getMonth(), dt.getDate());
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const diffDays = Math.round((dateOnly.getTime() - today.getTime()) / 86400000);
+
+  if (diffDays === -1) return 'Hôm qua';
+  if (diffDays === 0) return 'Hôm nay';
+  if (diffDays === 1) return 'Ngày mai';
+  if (diffDays === 2) return 'Ngày mốt';
+
+  // Trong tuần (3-6 ngày tới hoặc 2-6 ngày trước) → tên thứ
+  if (diffDays >= 3 && diffDays <= 6) {
+    const weekday = dt.toLocaleDateString('vi-VN', { weekday: 'long' });
+    return weekday.replace(/^./, c => c.toUpperCase()); // "thứ hai" → "Thứ hai"
+  }
+  if (diffDays <= -2 && diffDays >= -6) {
+    const weekday = dt.toLocaleDateString('vi-VN', { weekday: 'long' });
+    return `${weekday.replace(/^./, c => c.toUpperCase())} tuần trước`;
+  }
+
+  // Xa hơn → full date
+  return dt.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' });
 }
 
 function startEdit(apt: Appointment) {
@@ -531,16 +564,27 @@ async function submitEdit(appointmentId: string) {
 
 .apt-row {
   background: rgba(255, 183, 77, 0.05);
-  border: 1px solid rgba(255, 183, 77, 0.15);
+  border: 1.5px solid rgba(255, 183, 77, 0.3);
   border-radius: 10px;
   padding: 8px 10px;
   margin-bottom: 6px;
   transition: background 0.15s ease;
 }
-.apt-row.past {
+/* Overdue: border đỏ cảnh báo, nền cam nhạt */
+.apt-row.apt-overdue {
+  background: rgba(255, 87, 34, 0.06);
+  border-color: #ef5350;
+  box-shadow: 0 0 0 1px rgba(239, 83, 80, 0.15);
+}
+/* Done (completed/cancelled/no_show): border xám, đẩy xuống dưới, mờ nhẹ */
+.apt-row.apt-done {
   background: rgba(0, 0, 0, 0.02);
-  border-color: rgba(0, 0, 0, 0.08);
-  opacity: 0.75;
+  border-color: rgba(0, 0, 0, 0.12);
+  opacity: 0.7;
+}
+.apt-row.apt-done .apt-datetime {
+  text-decoration: line-through;
+  color: #9e9e9e;
 }
 
 .apt-datetime {
