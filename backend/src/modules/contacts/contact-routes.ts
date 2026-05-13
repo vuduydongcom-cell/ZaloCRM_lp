@@ -40,11 +40,19 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
       if (status) where.status = status;
       if (assignedUserId) where.assignedUserId = assignedUserId;
       if (search) {
+        const digits = search.replace(/[^\d]/g, '');
         where.OR = [
           { fullName: { contains: search, mode: 'insensitive' } },
           { crmName: { contains: search, mode: 'insensitive' } },
           { phone: { contains: search } },
           { email: { contains: search, mode: 'insensitive' } },
+          { zaloUid: { equals: search } },
+          { zaloGlobalId: { equals: search } },
+          { zaloUsername: { equals: search } },
+          ...(digits.length >= 9 ? [
+            { phone2: { contains: digits } },
+            { phone3: { contains: digits } },
+          ] : []),
         ];
       }
 
@@ -530,23 +538,151 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
   });
 
   // ── POST /api/v1/conversations/ensure-by-uid — find-or-create Conv (account, uid) ─
-  // Use case: user click "Nhắn tin" trong ZaloUserInfoDialog từ avatar trong group chat.
-  // Nick hiện tại có thể chưa từng nhắn riêng với UID đó → tạo conv mới.
-  // Khác /friends/:id/ensure-conversation: ở đây có thể chưa có Friend row (UID lạ
-  // gặp trong group). Tự link contactId nếu tìm thấy Contact theo zaloUid.
+  // Use case: user click "Nhắn tin" trong ZaloUserInfoDialog HOẶC sau khi
+  // lookup-by-phone discover UID per-nick. UID phải là **UID per-viewer của nick này**
+  // (lấy từ findUser/getUserInfo của chính account đó) — UID từ nick khác sẽ KHÔNG
+  // gửi tin được vì Zalo per-account UID.
+  //
+  // Body cờ `commit=true` (default false): khi true sẽ upsert Friend row + link/backfill
+  // Contact — dùng cho NewMessageDialog "Bắt đầu chat" (commitment). Khi false (default,
+  // dùng cho ZaloUserInfoDialog avatar click) chỉ tạo Conv, KHÔNG sinh Friend row "ma"
+  // để Contacts view không hiện KH Con chưa thực sự chat.
+  //
+  // Friend row chính thức sinh ra khi:
+  //  - Có inbound/outbound msg đầu tiên (qua applyFriendAggregate)
+  //  - Friend sync từ Zalo getAllFriends (đã kết bạn)
+  //  - commit=true ở đây (explicit user action)
   app.post('/api/v1/conversations/ensure-by-uid', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       const user = request.user!;
-      const body = (request.body || {}) as { zaloAccountId?: string; uid?: string };
+      const body = (request.body || {}) as {
+        zaloAccountId?: string;
+        uid?: string;
+        // commit=true → tạo Friend + link Contact ngay (explicit "Bắt đầu chat")
+        commit?: boolean;
+        // Snapshot từ lookup result (chỉ dùng khi commit=true)
+        zaloName?: string;
+        zaloAvatarUrl?: string;
+        zaloGlobalId?: string;
+        zaloUsername?: string;
+        phone?: string;
+        // Contact link mode khi commit=true:
+        //   'auto' (default) = match theo zaloUid/zaloGlobalId/phone, không tạo mới
+        //   'attach:<contactId>' = attach Friend vào Contact cụ thể (user picked)
+        //   'create' = tạo Contact mới
+        contactMode?: string;
+      };
       if (!body.zaloAccountId || !body.uid) {
         return reply.status(400).send({ error: 'zaloAccountId và uid required' });
       }
-      // Verify account thuộc org user
       const account = await prisma.zaloAccount.findFirst({
         where: { id: body.zaloAccountId, orgId: user.orgId },
         select: { id: true },
       });
       if (!account) return reply.status(404).send({ error: 'Zalo account not found' });
+
+      // Resolve contactId (chỉ tìm, KHÔNG tạo Friend ở chế độ default).
+      // Order: zaloGlobalId > zaloUsername > zaloUid > phone (theo độ tin cậy globally-unique).
+      let linkedContactId: string | null = null;
+      if (body.zaloGlobalId) {
+        const c = await prisma.contact.findFirst({
+          where: { orgId: user.orgId, zaloGlobalId: body.zaloGlobalId, mergedInto: null },
+          select: { id: true },
+        });
+        if (c) linkedContactId = c.id;
+      }
+      if (!linkedContactId && body.zaloUsername) {
+        const c = await prisma.contact.findFirst({
+          where: { orgId: user.orgId, zaloUsername: body.zaloUsername, mergedInto: null },
+          select: { id: true },
+        });
+        if (c) linkedContactId = c.id;
+      }
+      if (!linkedContactId) {
+        const c = await prisma.contact.findFirst({
+          where: { orgId: user.orgId, zaloUid: body.uid, mergedInto: null },
+          select: { id: true },
+        });
+        if (c) linkedContactId = c.id;
+      }
+      if (!linkedContactId && body.phone) {
+        const c = await prisma.contact.findFirst({
+          where: { orgId: user.orgId, phone: body.phone, mergedInto: null },
+          select: { id: true },
+        });
+        if (c) linkedContactId = c.id;
+      }
+
+      // commit=true → explicit commitment (NewMessageDialog "Bắt đầu chat")
+      if (body.commit) {
+        // contactMode handling
+        if (body.contactMode?.startsWith('attach:')) {
+          const cid = body.contactMode.slice(7);
+          const c = await prisma.contact.findFirst({
+            where: { id: cid, orgId: user.orgId, mergedInto: null },
+            select: { id: true },
+          });
+          if (!c) return reply.status(400).send({ error: 'attach contact not found' });
+          linkedContactId = cid;
+        } else if (body.contactMode === 'create' || (!linkedContactId && body.phone)) {
+          // Tạo Contact mới khi không match, hoặc khi user explicit chọn 'create'
+          const newC = await prisma.contact.create({
+            data: {
+              orgId: user.orgId,
+              zaloUid: body.uid,
+              zaloGlobalId: body.zaloGlobalId || null,
+              zaloUsername: body.zaloUsername || null,
+              phone: body.phone || null,
+              fullName: body.zaloName || (body.phone ? `KH ${body.phone}` : `KH-${body.uid.slice(-4)}`),
+              avatarUrl: body.zaloAvatarUrl || null,
+              hasZalo: true,
+              source: 'compose_new',
+            },
+            select: { id: true },
+          });
+          linkedContactId = newC.id;
+        } else if (linkedContactId) {
+          // Backfill zaloUid/global/username vào Contact đã có (nếu thiếu)
+          await prisma.contact.update({
+            where: { id: linkedContactId },
+            data: {
+              ...(body.uid ? { zaloUid: body.uid } : {}),
+              ...(body.zaloGlobalId ? { zaloGlobalId: body.zaloGlobalId } : {}),
+              ...(body.zaloUsername ? { zaloUsername: body.zaloUsername } : {}),
+              hasZalo: true,
+            },
+          }).catch(() => {});
+        }
+
+        // Upsert Friend cho cặp (nick, uid) — commitment thực sự
+        if (linkedContactId) {
+          await prisma.friend.upsert({
+            where: {
+              zaloAccountId_zaloUidInNick: {
+                zaloAccountId: body.zaloAccountId,
+                zaloUidInNick: body.uid,
+              },
+            },
+            create: {
+              orgId: user.orgId,
+              contactId: linkedContactId,
+              zaloAccountId: body.zaloAccountId,
+              zaloUidInNick: body.uid,
+              relationshipKind: 'chatting_stranger',
+              hasConversation: true,
+              zaloDisplayName: body.zaloName || null,
+              zaloAvatarUrl: body.zaloAvatarUrl || null,
+            },
+            update: {
+              hasConversation: true,
+              ...(body.zaloName ? { zaloDisplayName: body.zaloName } : {}),
+              ...(body.zaloAvatarUrl ? { zaloAvatarUrl: body.zaloAvatarUrl } : {}),
+            },
+          }).catch((err: unknown) => {
+            logger.warn('[ensure-by-uid] Friend upsert failed:', err);
+          });
+        }
+      }
 
       const existing = await prisma.conversation.findFirst({
         where: { zaloAccountId: body.zaloAccountId, externalThreadId: body.uid },
@@ -554,18 +690,11 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
       });
       if (existing) return reply.send({ conversationId: existing.id, created: false });
 
-      // Link Contact nếu tồn tại theo zaloUid (cùng org); else null — sẽ resolve sau khi
-      // có inbound msg đầu tiên qua message-handler.findOrCreateContact.
-      const linkedContact = await prisma.contact.findFirst({
-        where: { orgId: user.orgId, zaloUid: body.uid, mergedInto: null },
-        select: { id: true },
-      });
-
       const created = await prisma.conversation.create({
         data: {
           orgId: user.orgId,
           zaloAccountId: body.zaloAccountId,
-          contactId: linkedContact?.id ?? null,
+          contactId: linkedContactId,
           threadType: 'user',
           externalThreadId: body.uid,
           lastMessageAt: new Date(),

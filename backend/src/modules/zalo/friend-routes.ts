@@ -205,6 +205,47 @@ export async function friendRoutes(app: FastifyInstance) {
     }
   });
 
+  // POST .../friends/lookup-by-phone body {phone} — phone→UID discovery per nick.
+  // Bản chất: cùng KH Zalo có UID khác nhau theo mỗi nick CRM nhìn. Muốn nhắn từ
+  // nick A, phải tìm UID **A nhìn thấy** (zca-js findUser từ session của A).
+  // Trả về uid + tên + avatar perspective của nick này → dùng cho ensure-by-uid.
+  app.post(`${BASE}/lookup-by-phone`, async (request: FastifyRequest, reply: FastifyReply) => {
+    const { accountId } = request.params as { accountId: string };
+    const body = (request.body || {}) as { phone?: string };
+    const user = request.user!;
+    if (!body.phone) return reply.status(400).send({ error: 'phone required' });
+    if (!await checkAccess(request, reply, accountId, 'read')) return;
+    // Normalize: Zalo findUser nhận format không có + (e.g. 84xxx hoặc 0xxx ok cả 2).
+    const phone = body.phone.replace(/[^\d]/g, '');
+    if (phone.length < 9) return reply.status(400).send({ error: 'phone format invalid' });
+    try {
+      await resolveAccount(accountId, user.orgId);
+      const result = await zaloOps.findUser(accountId, phone);
+      const u = (result as Record<string, unknown>) || {};
+      const uid = String(u.uid || u.userId || '') || null;
+      if (!uid) {
+        return reply.send({ found: false, reason: 'no_zalo', detail: 'SĐT này không có Zalo' });
+      }
+      return reply.send({
+        found: true,
+        uid,
+        zaloName: String(u.zaloName || u.zalo_name || u.displayName || u.display_name || '') || null,
+        username: String(u.username || '') || null,
+        globalId: String(u.globalId || '') || null,
+        avatar: String(u.avatar || '') || null,
+        phone,
+      });
+    } catch (err: unknown) {
+      const e = err as { code?: string; message?: string };
+      // ZaloApiError code 216 = no Zalo for phone (zca-js có thể throw thay vì trả empty)
+      if (e?.code === 'NOT_CONNECTED' || e?.code === 'RATE_LIMITED') {
+        return reply.status(503).send({ error: e.code, detail: e.message });
+      }
+      // Default: treat as not found (Zalo phổ biến throw cho phone lạ)
+      return reply.send({ found: false, reason: 'lookup_failed', detail: String(e?.message || err) });
+    }
+  });
+
   // GET .../friends/online — get online friends
   app.get(`${BASE}/online`, async (request: FastifyRequest, reply: FastifyReply) => {
     const { accountId } = request.params as { accountId: string };

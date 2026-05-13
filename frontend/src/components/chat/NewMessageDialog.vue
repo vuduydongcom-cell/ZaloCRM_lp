@@ -1,5 +1,5 @@
 <template>
-  <v-dialog :model-value="modelValue" @update:model-value="$emit('update:modelValue', $event)" max-width="520">
+  <v-dialog :model-value="modelValue" @update:model-value="$emit('update:modelValue', $event)" max-width="640">
     <v-card>
       <v-card-title class="d-flex align-center">
         <v-icon class="mr-2" color="primary">mdi-message-plus</v-icon>
@@ -7,7 +7,7 @@
       </v-card-title>
 
       <v-card-text>
-        <!-- Pick nick CRM -->
+        <!-- Pick nick CRM (account) -->
         <v-select
           v-model="selectedAccountId"
           :items="accountItems"
@@ -21,10 +21,9 @@
           @update:model-value="onAccountChange"
         />
 
-        <!-- Search friend by name / phone / UID -->
         <v-text-field
           v-model="query"
-          label="Tìm bạn theo tên, SĐT hoặc UID"
+          label="Tìm bạn: tên / SĐT / UID / globalId / username"
           variant="outlined"
           density="comfortable"
           prepend-inner-icon="mdi-magnify"
@@ -33,43 +32,164 @@
           @input="onSearchInput"
         />
 
-        <!-- Result list -->
-        <div class="mt-3 friend-result-list">
+        <div class="mt-3 result-list">
           <div v-if="searching" class="text-center text-grey pa-3">
             <v-progress-circular indeterminate size="20" />
           </div>
           <div v-else-if="!selectedAccountId" class="text-grey text-caption pa-3 text-center">
-            Chọn nick CRM để tìm bạn
+            Chọn nick CRM để tìm KH
           </div>
-          <div v-else-if="friends.length === 0 && query" class="text-grey text-caption pa-3 text-center">
-            Không tìm thấy bạn — kiểm tra lại SĐT/tên hoặc sync friend list cho nick này
-          </div>
-          <div v-else-if="friends.length === 0" class="text-grey text-caption pa-3 text-center">
-            Gõ tên / SĐT / UID để tìm
-          </div>
-          <button
-            v-for="f in friends"
-            :key="f.id"
-            class="friend-row"
-            :class="{ active: f.id === pickedFriendId }"
-            @click="pickedFriendId = f.id"
-          >
-            <Avatar
-              :src="f.zaloAvatarUrl"
-              :name="f.zaloDisplayName || f.contact?.fullName || 'KH'"
-              :size="36"
-              :gradient-seed="f.id"
-              platform="zalo"
-            />
-            <div class="friend-info">
-              <div class="friend-name">{{ f.zaloDisplayName || f.contact?.fullName || `KH-${f.zaloUidInNick.slice(-4)}` }}</div>
-              <div class="friend-meta">
-                <span v-if="f.contact?.phone">📞 {{ f.contact.phone }}</span>
-                <span class="uid">UID: {{ f.zaloUidInNick }}</span>
-              </div>
+
+          <!-- Tier 1: Friend rows của NICK NÀY (KH nick này đang chăm) -->
+          <div v-if="friendRows.length" class="result-section">
+            <div class="result-section-title">
+              <v-icon size="14" color="success">mdi-account-multiple-check</v-icon>
+              {{ accountTitle }} đang chăm ({{ friendRows.length }})
             </div>
-            <v-icon v-if="f.id === pickedFriendId" color="primary">mdi-check-circle</v-icon>
-          </button>
+            <button
+              v-for="f in friendRows"
+              :key="f.id"
+              class="row-card"
+              :class="{ active: pickedKind === 'friend' && pickedId === f.id }"
+              @click="pickFriend(f)"
+            >
+              <Avatar
+                :src="f.zaloAvatarUrl"
+                :name="f.zaloDisplayName || f.contact?.fullName || 'KH'"
+                :size="38"
+                :gradient-seed="f.id"
+                platform="zalo"
+              />
+              <div class="row-body">
+                <div class="row-name">
+                  {{ f.zaloDisplayName || f.contact?.fullName || `KH-${f.zaloUidInNick.slice(-4)}` }}
+                  <span v-if="!f.hasConversation" class="badge badge-warn" title="Chỉ kết bạn Zalo, chưa từng nhắn 1-1">chỉ KB</span>
+                  <span v-else class="badge badge-ok" title="Đã có chat 1-1">đang chat</span>
+                </div>
+                <div class="row-meta">
+                  <span v-if="f.contact?.phone">📞 {{ f.contact.phone }}</span>
+                  <span class="uid">UID: {{ f.zaloUidInNick }}</span>
+                </div>
+              </div>
+              <v-icon v-if="pickedKind === 'friend' && pickedId === f.id" color="primary">mdi-check-circle</v-icon>
+            </button>
+          </div>
+
+          <!-- Tier 2: Contact đã có trong CRM (org-wide, qua phone/uid/globalId/username) -->
+          <div v-if="contactRows.length" class="result-section">
+            <div class="result-section-title">
+              <v-icon size="14" color="info">mdi-account-search</v-icon>
+              Đã có trong CRM ({{ contactRows.length }}) — chưa gắn vào nick này
+            </div>
+            <div
+              v-for="c in contactRows"
+              :key="c.id"
+              class="row-card row-card--contact"
+              :class="{ active: pickedKind === 'contact' && pickedId === c.id }"
+              @click="pickContact(c)"
+            >
+              <Avatar
+                :src="c.avatarUrl"
+                :name="c.crmName || c.fullName || 'KH'"
+                :size="38"
+                :gradient-seed="c.id"
+              />
+              <div class="row-body">
+                <div class="row-name">{{ c.crmName || c.fullName || 'KH chưa đặt tên' }}</div>
+                <div class="row-meta">
+                  <span v-if="c.phone">📞 {{ c.phone }}</span>
+                  <span v-if="c.assignedUser" class="meta-sale">👤 {{ c.assignedUser.fullName }}</span>
+                  <span v-if="c.statusRef" class="meta-status" :style="{ color: c.statusRef.color || undefined }">⬤ {{ c.statusRef.name }}</span>
+                  <span v-if="c.leadScore">⭐ {{ c.leadScore }}</span>
+                </div>
+                <div class="row-keys">
+                  <span v-if="c.zaloGlobalId" class="key" title="Zalo globalId (toàn cục)">G:{{ c.zaloGlobalId.slice(0, 8) }}…</span>
+                  <span v-if="c.zaloUsername" class="key" title="Zalo username">@{{ c.zaloUsername }}</span>
+                  <span v-if="c.zaloUid" class="key" title="zaloUid (per-nick chính)">UID:{{ c.zaloUid.slice(-6) }}</span>
+                  <span v-if="(c.tags as string[])?.length" class="row-tags">
+                    <span v-for="t in (c.tags as string[]).slice(0, 3)" :key="t" class="tag-mini">{{ t }}</span>
+                  </span>
+                </div>
+              </div>
+              <v-icon v-if="pickedKind === 'contact' && pickedId === c.id" color="primary">mdi-check-circle</v-icon>
+            </div>
+          </div>
+
+          <!-- Tier 3: Zalo lookup discovered (KH hoàn toàn mới) -->
+          <div v-if="lookupResult?.found" class="result-section">
+            <div class="result-section-title">
+              <v-icon size="14" color="warning">mdi-account-plus</v-icon>
+              Discover qua Zalo (chưa có trong CRM)
+            </div>
+            <button
+              class="row-card row-card--lookup"
+              :class="{ active: pickedKind === 'lookup' }"
+              @click="pickedKind = 'lookup'; pickedId = null"
+            >
+              <Avatar
+                :src="lookupResult.avatar"
+                :name="lookupResult.zaloName || `KH-${lookupResult.uid.slice(-4)}`"
+                :size="38"
+                :gradient-seed="lookupResult.uid"
+                platform="zalo"
+              />
+              <div class="row-body">
+                <div class="row-name">
+                  {{ lookupResult.zaloName || `KH-${lookupResult.uid.slice(-4)}` }}
+                  <span class="badge badge-new">KH mới</span>
+                </div>
+                <div class="row-meta">
+                  <span>📞 {{ lookupResult.phone }}</span>
+                  <span class="uid">UID {{ accountTitle }} nhìn: {{ lookupResult.uid }}</span>
+                </div>
+                <div v-if="lookupResult.globalId || lookupResult.username" class="row-keys">
+                  <span v-if="lookupResult.globalId" class="key">G:{{ lookupResult.globalId.slice(0, 8) }}…</span>
+                  <span v-if="lookupResult.username" class="key">@{{ lookupResult.username }}</span>
+                </div>
+              </div>
+              <v-icon v-if="pickedKind === 'lookup'" color="primary">mdi-check-circle</v-icon>
+            </button>
+          </div>
+
+          <!-- Empty / hint / lookup trigger -->
+          <div v-if="!searching && !friendRows.length && !contactRows.length && !lookupResult && selectedAccountId" class="pa-3">
+            <div v-if="!query" class="text-grey text-caption text-center">
+              Gõ tên / SĐT / UID / globalId để tìm
+            </div>
+            <div v-else-if="lookingUp" class="text-grey text-caption text-center">
+              <v-progress-circular indeterminate size="16" class="mr-2" />
+              Đang tra SĐT trên Zalo qua nick {{ accountTitle }}…
+            </div>
+            <div v-else-if="lookupNotFound" class="text-grey text-caption text-center">
+              ⚠ {{ lookupNotFound }}
+            </div>
+            <button
+              v-else-if="isPhoneQuery"
+              class="lookup-trigger"
+              :disabled="lookingUp"
+              @click="runZaloLookup"
+            >
+              🔍 Tra Zalo cho SĐT "{{ query }}" từ nick {{ accountTitle }}
+              <div class="trigger-hint">UID Zalo per-nick — cùng KH ra UID khác nhau mỗi nick</div>
+            </button>
+            <div v-else class="text-grey text-caption text-center">
+              Không match KH nào. Nếu là SĐT (≥9 số), gõ đủ để tra Zalo.
+            </div>
+          </div>
+        </div>
+
+        <!-- Pick contact: "Tạo KH mới" vs "Gắn vào KH đã chọn ở trên" — chỉ hiện khi lookup -->
+        <div v-if="pickedKind === 'lookup' && lookupResult" class="mt-3 commit-options">
+          <div class="commit-title">Sau khi mở chat, KH này sẽ:</div>
+          <v-radio-group v-model="lookupCommitMode" hide-details density="compact">
+            <v-radio value="create" label="Tạo Contact MỚI trong CRM" />
+            <v-radio
+              v-for="c in contactRows"
+              :key="c.id"
+              :value="`attach:${c.id}`"
+              :label="`Gắn vào KH có sẵn: ${c.crmName || c.fullName || 'KH'}${c.phone ? ' (' + c.phone + ')' : ''}`"
+            />
+          </v-radio-group>
         </div>
       </v-card-text>
 
@@ -79,11 +199,11 @@
         <v-btn
           color="primary"
           variant="flat"
-          :disabled="!pickedFriendId || opening"
+          :disabled="!canOpen || opening"
           :loading="opening"
           @click="onOpenChat"
         >
-          Mở chat
+          {{ openButtonLabel }}
         </v-btn>
       </v-card-actions>
     </v-card>
@@ -102,7 +222,32 @@ interface FriendRow {
   zaloUidInNick: string;
   zaloDisplayName: string | null;
   zaloAvatarUrl: string | null;
+  hasConversation: boolean;
+  relationshipKind: string;
   contact?: { id: string; fullName: string | null; phone: string | null } | null;
+}
+interface ContactRow {
+  id: string;
+  fullName: string | null;
+  crmName: string | null;
+  phone: string | null;
+  avatarUrl: string | null;
+  zaloUid: string | null;
+  zaloGlobalId: string | null;
+  zaloUsername: string | null;
+  leadScore: number;
+  tags: unknown;
+  statusRef?: { id: string; name: string; color: string | null } | null;
+  assignedUser?: { id: string; fullName: string | null } | null;
+}
+interface LookupResult {
+  found: boolean;
+  uid: string;
+  zaloName: string | null;
+  username: string | null;
+  globalId: string | null;
+  avatar: string | null;
+  phone: string;
 }
 
 const props = defineProps<{
@@ -121,62 +266,217 @@ const toast = useToast();
 const accountItems = computed(() =>
   props.accounts.map(a => ({ value: a.id, title: a.displayName || 'Nick' })),
 );
+const accountTitle = computed(() => {
+  const found = props.accounts.find(a => a.id === selectedAccountId.value);
+  return found?.displayName || 'nick';
+});
 
 const selectedAccountId = ref<string | null>(props.defaultAccountId ?? null);
 const query = ref('');
-const friends = ref<FriendRow[]>([]);
+const friendRows = ref<FriendRow[]>([]);
+const contactRows = ref<ContactRow[]>([]);
 const searching = ref(false);
-const pickedFriendId = ref<string | null>(null);
+const pickedKind = ref<'friend' | 'contact' | 'lookup' | null>(null);
+const pickedId = ref<string | null>(null);
 const opening = ref(false);
 
-// Reset state khi dialog mở lại
-watch(() => props.modelValue, (v) => {
-  if (v) {
-    selectedAccountId.value = props.defaultAccountId
-      ?? (props.accounts.length === 1 ? props.accounts[0].id : null);
-    query.value = '';
-    friends.value = [];
-    pickedFriendId.value = null;
-  }
+const lookupResult = ref<LookupResult | null>(null);
+const lookingUp = ref(false);
+const lookupNotFound = ref<string | null>(null);
+const lookupCommitMode = ref<string>('create'); // 'create' | 'attach:<contactId>'
+
+const isPhoneQuery = computed(() => {
+  const digits = query.value.replace(/[^\d]/g, '');
+  return digits.length >= 9 && digits.length <= 12;
 });
+
+const canOpen = computed(() => {
+  if (pickedKind.value === 'friend') return !!pickedId.value;
+  if (pickedKind.value === 'contact') return !!pickedId.value;
+  if (pickedKind.value === 'lookup') return !!lookupResult.value?.found;
+  return false;
+});
+
+const openButtonLabel = computed(() => {
+  if (pickedKind.value === 'friend') return 'Mở chat';
+  if (pickedKind.value === 'contact') return 'Bắt đầu chat & gắn vào nick này';
+  if (pickedKind.value === 'lookup') {
+    return lookupCommitMode.value === 'create'
+      ? 'Tạo KH + Bắt đầu chat'
+      : 'Gắn vào KH có sẵn + Bắt đầu chat';
+  }
+  return 'Mở chat';
+});
+
+function resetState() {
+  selectedAccountId.value = props.defaultAccountId
+    ?? (props.accounts.length === 1 ? props.accounts[0].id : null);
+  query.value = '';
+  friendRows.value = [];
+  contactRows.value = [];
+  pickedKind.value = null;
+  pickedId.value = null;
+  lookupResult.value = null;
+  lookupNotFound.value = null;
+  lookupCommitMode.value = 'create';
+}
+
+watch(() => props.modelValue, (v) => { if (v) resetState(); });
+
+function pickFriend(f: FriendRow) {
+  pickedKind.value = 'friend';
+  pickedId.value = f.id;
+}
+function pickContact(c: ContactRow) {
+  pickedKind.value = 'contact';
+  pickedId.value = c.id;
+}
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 function onSearchInput() {
+  lookupResult.value = null;
+  lookupNotFound.value = null;
+  pickedKind.value = null;
+  pickedId.value = null;
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = setTimeout(() => runSearch(), 250);
 }
 function onAccountChange() {
-  friends.value = [];
-  pickedFriendId.value = null;
+  resetState();
+  selectedAccountId.value = selectedAccountId.value; // keep
   if (query.value) runSearch();
 }
 
 async function runSearch() {
-  if (!selectedAccountId.value) return;
+  if (!selectedAccountId.value || !query.value.trim()) {
+    friendRows.value = [];
+    contactRows.value = [];
+    return;
+  }
   searching.value = true;
   try {
-    const res = await api.get<{ friends?: FriendRow[] }>(
-      `/zalo-accounts/${selectedAccountId.value}/friends-db`,
-      { params: { kind: 'all', page: 1, limit: 30, search: query.value } },
-    );
-    friends.value = res.data?.friends || [];
+    // Song song: search Friend (per-nick) + Contact (org-wide)
+    const [fRes, cRes] = await Promise.all([
+      api.get<{ friends?: FriendRow[] }>(
+        `/zalo-accounts/${selectedAccountId.value}/friends-db`,
+        { params: { kind: 'all', page: 1, limit: 20, search: query.value } },
+      ),
+      api.get<{ contacts?: ContactRow[] }>(`/contacts`, {
+        params: { search: query.value, limit: 10, page: 1 },
+      }),
+    ]);
+    const fs = fRes.data?.friends || [];
+    const cs = cRes.data?.contacts || [];
+    // De-dup: bỏ Contact đã có Friend với nick này (đã hiện ở Tier 1)
+    const friendContactIds = new Set(fs.map(f => f.contact?.id).filter(Boolean));
+    friendRows.value = fs;
+    contactRows.value = cs.filter(c => !friendContactIds.has(c.id));
   } catch (err) {
     console.error('[NewMessageDialog] search failed:', err);
-    friends.value = [];
+    friendRows.value = [];
+    contactRows.value = [];
   } finally {
     searching.value = false;
   }
 }
 
+async function runZaloLookup() {
+  if (!selectedAccountId.value || !isPhoneQuery.value) return;
+  lookingUp.value = true;
+  lookupNotFound.value = null;
+  try {
+    const res = await api.post<LookupResult & { reason?: string; detail?: string }>(
+      `/zalo-accounts/${selectedAccountId.value}/friends/lookup-by-phone`,
+      { phone: query.value },
+    );
+    if (res.data?.found) {
+      lookupResult.value = res.data;
+      pickedKind.value = 'lookup';
+      // Default commit mode: nếu có Contact match qua key globally-unique (globalId/username) → gợi ý attach
+      const matchByKey = contactRows.value.find(c =>
+        (res.data.globalId && c.zaloGlobalId === res.data.globalId)
+        || (res.data.username && c.zaloUsername === res.data.username)
+        || (res.data.phone && c.phone === res.data.phone),
+      );
+      lookupCommitMode.value = matchByKey ? `attach:${matchByKey.id}` : 'create';
+    } else {
+      lookupNotFound.value = res.data?.detail || 'Không tra được trên Zalo';
+    }
+  } catch (err) {
+    const msg = (err as { response?: { data?: { detail?: string } } })
+      .response?.data?.detail || 'Lookup thất bại';
+    lookupNotFound.value = msg;
+  } finally {
+    lookingUp.value = false;
+  }
+}
+
 async function onOpenChat() {
-  if (!pickedFriendId.value) return;
+  if (!selectedAccountId.value) return;
   opening.value = true;
   try {
-    const res = await api.post<{ conversationId: string; created: boolean }>(
-      `/friends/${pickedFriendId.value}/ensure-conversation`, {},
-    );
-    if (res.data?.created) toast.success('Đã tạo cuộc trò chuyện mới');
-    emit('opened', res.data.conversationId);
+    if (pickedKind.value === 'friend' && pickedId.value) {
+      // KH đã có Friend với nick này → mở conv (idempotent ensure)
+      const res = await api.post<{ conversationId: string; created: boolean }>(
+        `/friends/${pickedId.value}/ensure-conversation`, {},
+      );
+      if (res.data?.created) toast.success('Đã tạo cuộc trò chuyện mới');
+      emit('opened', res.data.conversationId);
+    } else if (pickedKind.value === 'contact' && pickedId.value) {
+      // Contact đã có trong CRM, nhưng nick này chưa có Friend với KH.
+      // Cần lookup Zalo trước để biết UID per-nick — KHÔNG dùng Contact.zaloUid
+      // vì đó là UID per-viewer của nick KHÁC (sẽ không gửi tin được từ nick này).
+      const c = contactRows.value.find(x => x.id === pickedId.value);
+      if (!c?.phone) {
+        toast.error('KH này chưa có SĐT → không lookup được UID từ nick này');
+        return;
+      }
+      // Lookup-by-phone để lấy UID per-nick
+      const luRes = await api.post<LookupResult & { reason?: string; detail?: string }>(
+        `/zalo-accounts/${selectedAccountId.value}/friends/lookup-by-phone`,
+        { phone: c.phone },
+      );
+      if (!luRes.data?.found) {
+        toast.error(`Nick ${accountTitle.value} không tra được SĐT này trên Zalo: ${luRes.data?.detail || ''}`);
+        return;
+      }
+      const res = await api.post<{ conversationId: string; created: boolean }>(
+        '/conversations/ensure-by-uid',
+        {
+          zaloAccountId: selectedAccountId.value,
+          uid: luRes.data.uid,
+          commit: true,
+          contactMode: `attach:${c.id}`,
+          zaloName: luRes.data.zaloName,
+          zaloAvatarUrl: luRes.data.avatar,
+          zaloGlobalId: luRes.data.globalId,
+          zaloUsername: luRes.data.username,
+          phone: luRes.data.phone,
+        },
+      );
+      toast.success('Đã gắn KH vào nick này và mở chat');
+      emit('opened', res.data.conversationId);
+    } else if (pickedKind.value === 'lookup' && lookupResult.value) {
+      const r = lookupResult.value;
+      const res = await api.post<{ conversationId: string; created: boolean }>(
+        '/conversations/ensure-by-uid',
+        {
+          zaloAccountId: selectedAccountId.value,
+          uid: r.uid,
+          commit: true,
+          contactMode: lookupCommitMode.value,
+          zaloName: r.zaloName,
+          zaloAvatarUrl: r.avatar,
+          zaloGlobalId: r.globalId,
+          zaloUsername: r.username,
+          phone: r.phone,
+        },
+      );
+      toast.success(lookupCommitMode.value === 'create' ? 'Đã tạo KH + chat' : 'Đã gắn KH có sẵn + chat');
+      emit('opened', res.data.conversationId);
+    } else {
+      return;
+    }
     emit('update:modelValue', false);
   } catch (err) {
     const msg = (err as { response?: { data?: { error?: string } } }).response?.data?.error || 'Không mở được chat';
@@ -188,40 +488,99 @@ async function onOpenChat() {
 </script>
 
 <style scoped>
-.friend-result-list {
-  max-height: 340px;
+.result-list {
+  max-height: 420px;
   overflow-y: auto;
   border: 1px solid var(--smax-grey-200);
   border-radius: 8px;
+  background: var(--smax-grey-50);
 }
-.friend-row {
+.result-section + .result-section { border-top: 1px solid var(--smax-grey-200); }
+.result-section-title {
+  display: flex; align-items: center; gap: 6px;
+  padding: 6px 10px;
+  font-size: 11px; font-weight: 600;
+  color: var(--smax-grey-700);
+  text-transform: uppercase; letter-spacing: 0.3px;
+  background: var(--smax-grey-100);
+}
+.row-card {
   width: 100%;
-  display: flex; align-items: center; gap: 10px;
-  padding: 8px 10px;
-  background: transparent; border: none;
+  display: flex; align-items: flex-start; gap: 10px;
+  padding: 9px 11px;
+  background: var(--smax-bg);
+  border: none;
   border-bottom: 1px solid var(--smax-grey-100);
-  cursor: pointer;
-  text-align: left;
+  cursor: pointer; text-align: left;
   font-family: inherit;
 }
-.friend-row:last-child { border-bottom: none; }
-.friend-row:hover { background: var(--smax-grey-50); }
-.friend-row.active { background: var(--smax-primary-soft); }
-.friend-info { flex: 1; min-width: 0; }
-.friend-name {
-  font-weight: 600; font-size: 13.5px;
+.row-card:last-child { border-bottom: none; }
+.row-card:hover { background: var(--smax-grey-50); }
+.row-card.active { background: var(--smax-primary-soft); }
+.row-card--contact { background: rgba(33,150,243,0.03); }
+.row-card--lookup { background: rgba(255,145,0,0.05); }
+.row-body { flex: 1; min-width: 0; }
+.row-name {
+  font-weight: 600; font-size: 13px;
   color: var(--smax-text);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: flex; align-items: center; gap: 6px;
 }
-.friend-meta {
+.row-meta, .row-keys {
   font-size: 11px; color: var(--smax-grey-700);
-  display: flex; gap: 8px; flex-wrap: wrap;
+  display: flex; flex-wrap: wrap; gap: 8px;
   margin-top: 2px;
 }
-.friend-meta .uid {
+.row-meta .uid, .key {
   font-family: ui-monospace, monospace;
   background: var(--smax-grey-100);
   padding: 0 4px; border-radius: 3px;
   font-size: 10.5px;
+}
+.meta-sale { color: #0277bd; }
+.meta-status { font-weight: 600; }
+.row-tags { display: inline-flex; gap: 3px; }
+.tag-mini {
+  background: var(--smax-grey-100);
+  padding: 0 5px; border-radius: 8px;
+  font-size: 10px;
+}
+.badge {
+  display: inline-block;
+  font-size: 9.5px; font-weight: 700;
+  padding: 1px 6px; border-radius: 4px;
+  vertical-align: middle;
+  text-transform: uppercase;
+}
+.badge-warn { background: rgba(255,145,0,0.18); color: #ef6c00; }
+.badge-ok   { background: rgba(0,200,83,0.15);  color: #00897b; }
+.badge-new  { background: var(--smax-warning, #ff9100); color: white; }
+
+.lookup-trigger {
+  display: block; width: 100%;
+  padding: 12px;
+  background: var(--smax-primary-soft);
+  color: var(--smax-primary);
+  border: 1px dashed var(--smax-primary);
+  border-radius: 8px;
+  font-size: 12.5px; font-weight: 600;
+  cursor: pointer; font-family: inherit;
+}
+.lookup-trigger:hover { background: var(--smax-primary); color: white; }
+.lookup-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+.trigger-hint {
+  font-size: 10px; font-weight: 400;
+  opacity: 0.8; margin-top: 3px;
+}
+
+.commit-options {
+  background: rgba(33,150,243,0.05);
+  border-left: 3px solid var(--smax-primary);
+  padding: 8px 12px;
+  border-radius: 4px;
+}
+.commit-title {
+  font-size: 12px; font-weight: 600;
+  color: var(--smax-grey-700);
+  margin-bottom: 4px;
 }
 </style>

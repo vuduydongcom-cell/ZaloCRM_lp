@@ -205,6 +205,16 @@
                 <span :class="['status-pill', friendKindClass(f.relationshipKind)]" :title="'Trạng thái kết bạn Zalo'">
                   {{ friendKindLabel(f.relationshipKind) }}
                 </span>
+                <span
+                  v-if="f.hasConversation"
+                  class="conv-badge conv-badge--on"
+                  title="Đã từng nhắn 1-1 với KH qua nick này"
+                >💬</span>
+                <span
+                  v-else
+                  class="conv-badge conv-badge--off"
+                  title="Chỉ kết bạn Zalo, chưa có hội thoại 1-1 nào"
+                >ø</span>
               </div>
               <!-- KH theo nick này: avatar + tên Zalo riêng cho identity này (KHÔNG dùng tên KH Cha) -->
               <div class="friend-customer-row">
@@ -397,6 +407,7 @@ interface FriendItem {
   id: string;
   zaloUidInNick: string;
   relationshipKind: string;
+  hasConversation: boolean;
   totalInbound: number;
   totalOutbound: number;
   becameFriendAt: string | null;
@@ -415,7 +426,15 @@ const relations = ref<RelationsState>({ friends: [] });
 async function fetchRelations(contactId: string) {
   try {
     const res = await api.get<{ friends?: FriendItem[] }>(`/contacts/${contactId}`);
-    relations.value = { friends: res.data.friends || [] };
+    // Sort: "đang chat" lên đầu — sale chỉ care nick đã thực sự nhắn 1-1.
+    const all = res.data.friends || [];
+    all.sort((a, b) => {
+      if (a.hasConversation !== b.hasConversation) return a.hasConversation ? -1 : 1;
+      const at = a.lastInboundAt || '';
+      const bt = b.lastInboundAt || '';
+      return bt.localeCompare(at);
+    });
+    relations.value = { friends: all };
   } catch (err) {
     console.error('[ChatContactPanel] fetchRelations error:', err);
     relations.value = { friends: [] };
@@ -744,6 +763,13 @@ function relativeTime(dateStr: string) {
 .friend-card-row .ml-auto { margin-left: auto; }
 .friend-card-row.meta-line { padding-top: 6px; border-top: 1px dashed var(--smax-grey-200); margin-top: 4px; color: var(--smax-grey-700); }
 .friend-card-row.meta-line strong { color: var(--smax-text); }
+.conv-badge {
+  font-size: 11px; font-weight: 700;
+  padding: 1px 6px; border-radius: 4px;
+  margin-left: 4px;
+}
+.conv-badge--on  { background: rgba(0,200,83,0.15); color: #00897b; }
+.conv-badge--off { background: rgba(0,0,0,0.06);    color: #999;    }
 .friend-customer-row {
   display: flex; align-items: center; gap: 8px;
   padding: 6px 8px; margin: 4px 0 6px;

@@ -49,6 +49,23 @@
         <span v-if="candidateCount > 0" class="btn-badge">{{ candidateCount }}</span>
       </button>
       <button class="btn">⬇ Xuất</button>
+      <v-menu :close-on-content-click="false">
+        <template #activator="{ props: act }">
+          <button v-bind="act" class="btn" title="Bật/tắt cột tuỳ chọn">⚙ Cột</button>
+        </template>
+        <v-list density="compact" min-width="240">
+          <v-list-subheader>Cột Zalo identity</v-list-subheader>
+          <v-list-item v-for="c in OPTIONAL_COLUMNS" :key="c.key" @click="toggleColumn(c.key)">
+            <template #prepend>
+              <v-icon size="18" :color="visibleCols[c.key] ? 'primary' : ''">
+                {{ visibleCols[c.key] ? 'mdi-checkbox-marked' : 'mdi-checkbox-blank-outline' }}
+              </v-icon>
+            </template>
+            <v-list-item-title>{{ c.label }}</v-list-item-title>
+            <v-list-item-subtitle v-if="c.hint" class="text-caption">{{ c.hint }}</v-list-item-subtitle>
+          </v-list-item>
+        </v-list>
+      </v-menu>
       <button class="btn btn-primary" @click="openCreate">+ Thêm KH</button>
     </div>
 
@@ -82,6 +99,10 @@
             <th>Tin (in/out)</th>
             <th>Tags CRM</th>
             <th>Có Zalo?</th>
+            <th v-if="visibleCols.zaloUid" title="Zalo UID per-account chính (cũ nhất)">Zalo UID</th>
+            <th v-if="visibleCols.zaloGlobalId" title="Zalo globalId toàn cục (dedup cross-account)">Global ID</th>
+            <th v-if="visibleCols.zaloUsername" title="Zalo username (handle t_xxx)">Username</th>
+            <th v-if="visibleCols.lookupState" title="Trạng thái tra Zalo qua SĐT">Lookup</th>
             <th class="w-180">Action</th>
           </tr>
         </thead>
@@ -196,6 +217,25 @@
                 <span v-else-if="contact.hasZalo === false" class="chip chip-grey">Không</span>
                 <span v-else class="empty">?</span>
               </td>
+              <td v-if="visibleCols.zaloUid">
+                <code v-if="contact.zaloUid" class="uid-cell" :title="contact.zaloUid">{{ contact.zaloUid }}</code>
+                <span v-else class="empty">—</span>
+              </td>
+              <td v-if="visibleCols.zaloGlobalId">
+                <code v-if="contact.zaloGlobalId" class="uid-cell" :title="contact.zaloGlobalId">{{ contact.zaloGlobalId.slice(0, 12) }}…</code>
+                <span v-else class="empty">—</span>
+              </td>
+              <td v-if="visibleCols.zaloUsername">
+                <span v-if="contact.zaloUsername" class="uid-cell">@{{ contact.zaloUsername }}</span>
+                <span v-else class="empty">—</span>
+              </td>
+              <td v-if="visibleCols.lookupState">
+                <div v-if="contact.zaloLookupAt" class="two-line">
+                  <span class="line1">{{ formatRecentDateTime(contact.zaloLookupAt) }}</span>
+                  <span class="line2">{{ contact.zaloLookupAttempts || 0 }} attempts</span>
+                </div>
+                <span v-else class="empty">chưa tra</span>
+              </td>
               <td>
                 <div class="action-cell">
                   <button class="row-action-btn" @click="goChat(contact)" title="Mở chat">💬</button>
@@ -207,7 +247,7 @@
 
             <!-- Child row: nick chăm (real data từ /contacts/:id/friendships) -->
             <tr v-if="expandedId === contact.id" class="child-wrap">
-              <td colspan="17">
+              <td :colspan="totalColumnsCount">
                 <div class="child-table-wrap">
                   <div v-if="friendshipLoading[contact.id]" class="child-empty">Đang tải…</div>
                   <table v-else-if="childRows(contact).length" class="child-table">
@@ -258,9 +298,21 @@
                           </div>
                         </td>
                         <td>
-                          <span :class="['chip', kindChipClass(row.relationshipKind)]">
-                            {{ kindLabel(row.relationshipKind) }}
-                          </span>
+                          <div class="kb-cell">
+                            <span :class="['chip', kindChipClass(row.relationshipKind)]">
+                              {{ kindLabel(row.relationshipKind) }}
+                            </span>
+                            <span
+                              v-if="row.hasConversation"
+                              class="chip-conv chip-conv--on"
+                              title="Đã từng nhắn 1-1 với KH qua nick này"
+                            >💬 đang chat</span>
+                            <span
+                              v-else
+                              class="chip-conv chip-conv--off"
+                              title="Chỉ kết bạn Zalo, chưa có hội thoại 1-1 nào"
+                            >ø chỉ KB</span>
+                          </div>
                         </td>
                         <td>
                           <span
@@ -323,7 +375,7 @@
           </template>
 
           <tr v-if="!loading && !contacts.length">
-            <td colspan="17" class="empty-state">Không tìm thấy KH nào khớp bộ lọc.</td>
+            <td :colspan="totalColumnsCount" class="empty-state">Không tìm thấy KH nào khớp bộ lọc.</td>
           </tr>
         </tbody>
       </table>
@@ -389,6 +441,35 @@ const router = useRouter();
 const { contacts, total, loading, filters, pagination, fetchContacts } = useContacts();
 const { duplicateTotal, fetchDuplicateGroups } = useContactIntelligence();
 const toast = useToast();
+
+// ── Column toggle (optional Zalo identity columns) ─────────────────────────
+// Default ẨN — bật khi sale cần debug per-account UID hoặc xem global identifiers.
+// Persist sang localStorage để load lại nhớ pref.
+const OPTIONAL_COLUMNS = [
+  { key: 'zaloUid',      label: 'Zalo UID',  hint: 'Per-account UID chính (cũ nhất)' },
+  { key: 'zaloGlobalId', label: 'Global ID', hint: 'Toàn cục — dedup cross-account' },
+  { key: 'zaloUsername', label: 'Username',  hint: 'Handle t_xxx (toàn cục)' },
+  { key: 'lookupState',  label: 'Lookup',    hint: 'Trạng thái tra Zalo qua SĐT' },
+] as const;
+type OptColKey = (typeof OPTIONAL_COLUMNS)[number]['key'];
+const LS_KEY_COLS = 'contactsview.visibleCols.v1';
+function loadVisibleCols(): Record<OptColKey, boolean> {
+  const def = { zaloUid: false, zaloGlobalId: false, zaloUsername: false, lookupState: false };
+  try {
+    const raw = localStorage.getItem(LS_KEY_COLS);
+    if (raw) return { ...def, ...JSON.parse(raw) };
+  } catch { /* ignore */ }
+  return def;
+}
+const visibleCols = ref<Record<OptColKey, boolean>>(loadVisibleCols());
+function toggleColumn(key: OptColKey) {
+  visibleCols.value[key] = !visibleCols.value[key];
+  try { localStorage.setItem(LS_KEY_COLS, JSON.stringify(visibleCols.value)); } catch { /* ignore */ }
+}
+// Tổng cột để colspan empty-state đúng (17 cố định + count cột optional bật)
+const totalColumnsCount = computed(() =>
+  17 + Object.values(visibleCols.value).filter(Boolean).length,
+);
 
 const showDialog = ref(false);
 const showDuplicateDialog = ref(false);
@@ -506,6 +587,7 @@ function mapFriendshipToChildRow(f: ApiFriendship, contact: Contact): ChildRow {
     zaloName: f.zaloDisplayName || contact.fullName,
     zaloUid: f.zaloUidInNick,
     relationshipKind: kind,
+    hasConversation: f.hasConversation,
     careStatus: (contact.status as CareStatusValue) || 'interested',
     statusRef: f.statusRef,
     leadScore: f.leadScore ?? 0,
@@ -663,6 +745,7 @@ interface ChildRow {
   zaloName: string | null;
   zaloUid: string | null;
   relationshipKind: 'friend' | 'pending_friend' | 'chatting_stranger' | 'ghost';
+  hasConversation: boolean;
   careStatus: CareStatusValue;
   crmTagsPerNick: string[];
   zaloLabels: string[];
@@ -674,9 +757,16 @@ interface ChildRow {
   autoLabel: string | null;
 }
 
-/** Child rows từ cache thật (load qua /contacts/:id/friendships khi expand) */
+/** Child rows: sort "đang chat" lên đầu, "chỉ KB" (chưa nhắn 1-1) xuống dưới.
+ *  Tránh nhầm: KB Zalo ≠ đã chăm sóc — sale cần thấy ngay nick nào đã có dialog. */
 function childRows(contact: Contact): ChildRow[] {
-  return friendshipCache.value[contact.id] || [];
+  const rows = friendshipCache.value[contact.id] || [];
+  return [...rows].sort((a, b) => {
+    if (a.hasConversation !== b.hasConversation) return a.hasConversation ? -1 : 1;
+    const at = a.lastInboundAt || a.lastOutboundAt || '';
+    const bt = b.lastInboundAt || b.lastOutboundAt || '';
+    return bt.localeCompare(at);
+  });
 }
 
 
@@ -1056,6 +1146,29 @@ onMounted(() => {
 }
 
 .w-220 { width: 220px; }
+
+/* KB cell: chip relationship + badge "đang chat / chỉ KB" để phân biệt
+   Friend đã từng có conv 1-1 với Friend chỉ kết bạn Zalo (sync từ getAllFriends). */
+.kb-cell { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.chip-conv {
+  font-size: 9.5px; font-weight: 700;
+  padding: 1px 5px; border-radius: 4px;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.chip-conv--on  { background: rgba(0,200,83,0.12);  color: #00897b; }
+.chip-conv--off { background: rgba(0,0,0,0.06);     color: #888;    }
+
+/* Zalo identity columns (optional, toggle via ⚙ Cột) */
+.uid-cell {
+  font-family: ui-monospace, "Cascadia Code", Menlo, monospace;
+  font-size: 11px;
+  background: var(--smax-grey-100);
+  padding: 2px 6px;
+  border-radius: 4px;
+  color: var(--smax-grey-700);
+  word-break: break-all;
+}
 
 .empty-state {
   text-align: center;
