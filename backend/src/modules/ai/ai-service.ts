@@ -207,3 +207,66 @@ export async function generateAiOutput(input: { orgId: string; conversationId: s
   });
   return { content: text, confidence: 0.8 };
 }
+
+/* ──────────────────────────────────────────────────────────────────────────
+ * Parse a free-form note ("Thứ 6 gọi lại khách", "3 ngày nữa nhắn tin chốt giá")
+ * into a structured appointment proposal. Returns null if AI can't find a clear
+ * date/time intent — caller falls back to manual create.
+ * ────────────────────────────────────────────────────────────────────────── */
+export type ParsedAppointment = {
+  date: string | null;       // YYYY-MM-DD
+  time: string | null;       // HH:MM (24h)
+  type: string | null;       // 'call' | 'message' | 'meeting' | 'follow_up' | null
+  summary: string;           // tiêu đề ngắn cho lịch hẹn
+  confidence: number;        // 0..1
+};
+
+export async function parseAppointmentFromText(input: { orgId: string; text: string; now?: Date }): Promise<ParsedAppointment | null> {
+  const currentConfig = await getAiConfig(input.orgId);
+  if (!currentConfig.enabled) throw new Error('AI is disabled for this organization');
+  const apiKey = await getProviderApiKey(input.orgId, currentConfig.provider);
+  if (!apiKey) throw new Error('AI provider key is not configured');
+
+  const now = input.now || new Date();
+  const today = now.toISOString().slice(0, 10);
+  const weekday = ['Chủ nhật', 'Thứ 2', 'Thứ 3', 'Thứ 4', 'Thứ 5', 'Thứ 6', 'Thứ 7'][now.getDay()];
+
+  const system = [
+    'You parse a Vietnamese CRM note into an appointment proposal. Return STRICT JSON ONLY, no prose.',
+    'Output schema:',
+    '{ "date": "YYYY-MM-DD"|null, "time": "HH:MM"|null, "type": "call"|"message"|"meeting"|"follow_up"|null, "summary": string, "confidence": number_0_to_1 }',
+    'Rules:',
+    `- Hôm nay là ${today} (${weekday}). Tính ngày tuyệt đối cho "thứ X" (sang tuần tới nếu thứ đã qua), "N ngày nữa", "tuần sau", "tháng sau", "mai", "kia".`,
+    '- "gọi"/"call" → type=call. "nhắn tin"/"message" → type=message. "gặp"/"meeting" → type=meeting. Mặc định → follow_up.',
+    '- Nếu không có giờ rõ ràng, time=null. Nếu nói "sáng"=09:00, "chiều"=14:00, "tối"=19:00.',
+    '- summary: 1 câu ngắn ≤80 ký tự mô tả việc cần làm (vd: "Gọi lại khách hỏi báo giá").',
+    '- Nếu KHÔNG có ý định hẹn rõ ràng (chỉ là note thông thường), trả {"date":null,"time":null,"type":null,"summary":"","confidence":0}.',
+    '- Confidence > 0.5 chỉ khi date hoặc time được suy luận chắc chắn.',
+  ].join('\n');
+
+  const userPrompt = `<note>\n${escapeXmlBoundary(input.text)}\n</note>\nReturn JSON only.`;
+  const raw = await generateText(currentConfig.provider, apiKey, currentConfig.model, system, userPrompt);
+
+  // Strip code fences if model wrapped JSON in ```json ... ```
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/```\s*$/i, '').trim();
+  let parsed: Partial<ParsedAppointment>;
+  try {
+    parsed = JSON.parse(cleaned) as Partial<ParsedAppointment>;
+  } catch {
+    return null;
+  }
+  const confidence = Number.isFinite(parsed.confidence) ? Math.max(0, Math.min(1, parsed.confidence as number)) : 0;
+  if (confidence < 0.3 && !parsed.date) return null;
+
+  const validType = parsed.type && ['call', 'message', 'meeting', 'follow_up'].includes(parsed.type) ? parsed.type : null;
+  const dateOk = parsed.date && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date);
+  const timeOk = parsed.time && /^\d{2}:\d{2}$/.test(parsed.time);
+
+  return {
+    date: dateOk ? parsed.date! : null,
+    time: timeOk ? parsed.time! : null,
+    type: validType,
+    summary: (parsed.summary || '').slice(0, 200),
+    confidence,
+  };
+}

@@ -182,6 +182,11 @@
             >+ {{ s }}</button>
           </div>
         </section>
+
+        <!-- ──── CRM Notes thread (Facebook-style, AI appointment suggest) ──── -->
+        <section class="ip-section ip-notes-section">
+          <NotesSection :contact-id="props.contactId" />
+        </section>
       </div>
 
       <!-- ══════ TAB 2: QUAN HỆ (per-nick) ══════ -->
@@ -337,26 +342,6 @@
       </div>
     </div>
 
-    <!-- ════════ FOOTER ghi chú nhanh (pinned, collapsible) ════════ -->
-    <footer class="ip-note-footer" :class="{ expanded: noteExpanded }">
-      <button class="note-toggle" @click="noteExpanded = !noteExpanded">
-        <span class="note-toggle-icon">📝</span>
-        <span class="note-toggle-label">Ghi chú nhanh</span>
-        <span v-if="noteDraft && !noteExpanded" class="note-preview">{{ notePreview }}</span>
-        <span class="caret">{{ noteExpanded ? '▾' : '▴' }}</span>
-      </button>
-      <textarea
-        v-if="noteExpanded"
-        v-model="noteDraft"
-        class="note-input"
-        placeholder="Ctrl+Enter để lưu, Escape để hủy…"
-        rows="3"
-        @keydown.ctrl.enter.prevent="saveNote"
-        @keydown.meta.enter.prevent="saveNote"
-        @keydown.escape="onCancelNote"
-        @blur="saveNote"
-      />
-    </footer>
   </aside>
 </template>
 
@@ -375,6 +360,7 @@ import CareStatusBadge from '@/components/ui/CareStatusBadge.vue';
 import type { CareStatusValue } from '@/constants/care-status';
 import { useToast } from '@/composables/use-toast';
 import { api } from '@/api';
+import NotesSection from './NotesSection.vue';
 
 const props = defineProps<{
   contactId: string | null;
@@ -586,39 +572,12 @@ const hasAnyActivity = computed(() =>
   !!(props.aiSummary || props.aiSentiment || automationCards.value.length || contactAppointments.value.length),
 );
 
-// ════════ Note footer (pinned, collapsible) ════════
 const toast = useToast();
-const noteExpanded = ref(false);
-const noteDraft = ref('');
-const lastSavedNote = ref('');
-const notePreview = computed(() => {
-  const t = noteDraft.value.trim();
-  return t.length > 32 ? t.slice(0, 32) + '…' : t;
-});
 
-function saveNote() {
-  if (noteDraft.value === lastSavedNote.value) return;
-  (form as Record<string, unknown>).notes = noteDraft.value;
-  saveContact();
-  lastSavedNote.value = noteDraft.value;
-  toast.success('Đã lưu ghi chú');
-}
-function onCancelNote() {
-  noteDraft.value = lastSavedNote.value;
-  noteExpanded.value = false;
-}
-
-watch(() => props.contact?.notes, (n) => {
-  if (n != null) {
-    noteDraft.value = n;
-    lastSavedNote.value = n;
-  }
-}, { immediate: true });
-
-// Khi đổi sang contact mới, reset về tab Hồ sơ + collapse note + refetch relations
+// Khi đổi sang contact mới, reset về tab Hồ sơ + refetch relations
+// (NotesSection tự fetch khi prop contactId đổi)
 watch(() => props.contactId, (id) => {
   activeTab.value = 'profile';
-  noteExpanded.value = false;
   if (id) void fetchRelations(id);
   else relations.value = { friends: [] };
 }, { immediate: true });
@@ -1014,54 +973,8 @@ function relativeTime(dateStr: string) {
 }
 .ni-name { flex: 1; font-size: 12px; color: var(--smax-text); }
 
-/* ════════ Footer Ghi chú pinned ════════ */
-.ip-note-footer {
-  flex-shrink: 0;
-  border-top: 1px solid var(--smax-grey-200);
-  background: var(--smax-grey-50);
-}
-.note-toggle {
-  width: 100%;
-  background: transparent; border: none;
-  padding: 9px 13px;
-  display: flex; align-items: center; gap: 7px;
-  cursor: pointer;
-  font-family: inherit;
-  font-size: 12.5px;
-  color: var(--smax-grey-700);
-  text-align: left;
-}
-.note-toggle:hover { background: var(--smax-grey-100); }
-.note-toggle-icon { font-size: 14px; }
-.note-toggle-label { font-weight: 600; color: var(--smax-text); flex-shrink: 0; }
-.note-preview {
-  flex: 1; min-width: 0;
-  color: var(--smax-grey-700);
-  font-style: italic;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.note-toggle .caret { color: var(--smax-grey-700); font-size: 10px; }
-
-.ip-note-footer.expanded .note-toggle {
-  background: var(--smax-bg);
-  border-bottom: 1px solid var(--smax-grey-200);
-}
-.note-input {
-  width: 100%;
-  min-height: 70px;
-  max-height: 200px;
-  border: none;
-  border-top: 1px solid var(--smax-grey-100);
-  padding: 9px 13px;
-  font-size: 12.5px;
-  font-family: inherit;
-  resize: vertical;
-  outline: none;
-  color: var(--smax-text);
-  background: var(--smax-bg);
-  display: block;
-}
-.note-input:focus {
-  box-shadow: inset 0 0 0 2px rgba(33,150,243,0.10);
+/* ════════ Notes section in Tab Hồ Sơ ════════ */
+.ip-notes-section {
+  margin-top: 10px;
 }
 </style>
