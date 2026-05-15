@@ -715,7 +715,10 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
       };
       const friend = await prisma.friend.findFirst({
         where: { id, orgId: user.orgId },
-        select: { id: true },
+        select: {
+          id: true, contactId: true, statusId: true, leadScore: true,
+          crmTagsPerNick: true, aliasInNick: true,
+        },
       });
       if (!friend) return reply.status(404).send({ error: 'Friend not found' });
 
@@ -742,6 +745,61 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
           ...(body.aliasInNick !== undefined ? { aliasInNick: body.aliasInNick } : {}),
         },
       });
+
+      // ── ACTIVITY LOG — per-pair mutations log với entityType='contact' để timeline KH thấy
+      const entityId = friend.contactId;
+      if (entityId) {
+        if (body.statusId !== undefined && body.statusId !== friend.statusId) {
+          logActivity({
+            orgId: user.orgId,
+            userId: user.id,
+            action: 'status_change',
+            entityType: 'contact',
+            entityId,
+            details: { old: friend.statusId, new: body.statusId, scope: 'friend', friendId: friend.id },
+          });
+        }
+        if (body.leadScore !== undefined && body.leadScore !== friend.leadScore) {
+          logActivity({
+            orgId: user.orgId,
+            userId: user.id,
+            action: 'score_change',
+            entityType: 'contact',
+            entityId,
+            details: { old: friend.leadScore, new: body.leadScore, delta: body.leadScore - friend.leadScore, scope: 'friend', friendId: friend.id },
+          });
+        }
+        if (body.aliasInNick !== undefined && body.aliasInNick !== friend.aliasInNick) {
+          logActivity({
+            orgId: user.orgId,
+            userId: user.id,
+            action: 'friend_alias_change',
+            entityType: 'contact',
+            entityId,
+            details: { old: friend.aliasInNick, new: body.aliasInNick, friendId: friend.id },
+          });
+        }
+        if (cleanTags !== undefined) {
+          const oldT = Array.isArray(friend.crmTagsPerNick) ? (friend.crmTagsPerNick as string[]) : [];
+          const added = cleanTags.filter(t => !oldT.includes(t));
+          const removed = oldT.filter(t => !cleanTags!.includes(t));
+          for (const t of added) {
+            logActivity({
+              orgId: user.orgId, userId: user.id, action: 'tag_add_crm',
+              entityType: 'contact', entityId,
+              details: { tag: t, level: 'friend', friendId: friend.id },
+            });
+          }
+          for (const t of removed) {
+            logActivity({
+              orgId: user.orgId, userId: user.id, action: 'tag_remove_crm',
+              entityType: 'contact', entityId,
+              details: { tag: t, level: 'friend', friendId: friend.id },
+            });
+          }
+        }
+      }
+
       return reply.send(updated);
     } catch (err) {
       logger.error('[friends] update error:', err);

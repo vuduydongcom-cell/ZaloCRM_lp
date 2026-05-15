@@ -18,6 +18,7 @@ import { prisma } from '../../shared/database/prisma-client.js';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 import { zaloPool } from './zalo-pool.js';
+import { logActivity } from '../activity/activity-logger.js';
 
 type LabelDataFromSdk = {
   id: number | string;
@@ -107,15 +108,89 @@ export async function syncLabelsForAccount(accountId: string, orgId: string): Pr
     }
   }
 
-  // Bulk update friend.zaloLabels
+  // Bulk update friend.zaloLabels + mirror sang CrmTagsPerNick + log diff.
+  // Load existing zaloLabels để diff (detect added/removed labels per friend).
+  // Mirror naming: "🔵 {labelText}" prefix để dễ phân biệt Zalo-synced vs CRM-managed.
+  // Account display name dùng làm category để gom group.
+  const account = await prisma.zaloAccount.findUnique({
+    where: { id: accountId },
+    select: { displayName: true, phone: true },
+  });
+  const groupName = `Zalo - ${account?.displayName || 'Nick'}${account?.phone ? ` (${account.phone})` : ''}`;
+
+  // Auto-create CrmTag definitions cho mỗi label (idempotent — skipDuplicates)
+  await prisma.crmTag.createMany({
+    data: upserted.map(l => ({
+      orgId,
+      name: `🔵 ${l.text}`,
+      color: l.color || '#1976D2',
+      emoji: l.emoji || null,
+      category: groupName,
+      description: `Auto-sync từ Zalo label ID ${l.zaloLabelId}`,
+    })),
+    skipDuplicates: true,
+  });
+
+  // Bulk update friend.zaloLabels + diff log
+  const friendsFull = await prisma.friend.findMany({
+    where: { zaloAccountId: accountId },
+    select: { id: true, zaloUidInNick: true, contactId: true, zaloLabels: true, crmTagsPerNick: true },
+  });
   let friendsUpdated = 0;
-  for (const f of friends) {
-    const labels = uidToLabels.get(f.zaloUidInNick) || [];
+  for (const f of friendsFull) {
+    const newLabels = uidToLabels.get(f.zaloUidInNick) || [];
+    const oldLabels = Array.isArray(f.zaloLabels) ? (f.zaloLabels as Array<{ name?: string }>) : [];
+    const oldNames = new Set(oldLabels.map(l => l.name).filter(Boolean) as string[]);
+    const newNames = new Set(newLabels.map(l => l.name).filter(Boolean));
+    const addedLabels = [...newNames].filter(n => !oldNames.has(n));
+    const removedLabels = [...oldNames].filter(n => !newNames.has(n));
+
+    // Mirror sang crmTagsPerNick: remove tag "🔵 {oldLabel}" + add tag "🔵 {newLabel}"
+    const oldCrmTags = Array.isArray(f.crmTagsPerNick) ? (f.crmTagsPerNick as string[]) : [];
+    let newCrmTags = oldCrmTags.filter(t => {
+      // Giữ lại tag KHÔNG phải Zalo-mirrored, hoặc tag Zalo-mirrored mà vẫn còn trong newNames
+      if (!t.startsWith('🔵 ')) return true;
+      const labelName = t.slice(2);
+      return newNames.has(labelName);
+    });
+    for (const labelName of addedLabels) {
+      const mirroredTag = `🔵 ${labelName}`;
+      if (!newCrmTags.includes(mirroredTag)) newCrmTags.push(mirroredTag);
+    }
+
     await prisma.friend.update({
       where: { id: f.id },
-      data: { zaloLabels: labels, zaloLabelsSyncedAt: new Date() },
+      data: {
+        zaloLabels: newLabels,
+        zaloLabelsSyncedAt: new Date(),
+        crmTagsPerNick: newCrmTags,
+      },
     });
     friendsUpdated++;
+
+    // ── ACTIVITY LOG — tag_add_zalo / tag_remove_zalo (system actor) ──
+    if (f.contactId) {
+      for (const labelName of addedLabels) {
+        logActivity({
+          orgId,
+          systemSource: 'zalo_label_sync',
+          action: 'tag_add_zalo',
+          entityType: 'contact',
+          entityId: f.contactId,
+          details: { tag: labelName, friendId: f.id, accountId, trigger: 'sync' },
+        });
+      }
+      for (const labelName of removedLabels) {
+        logActivity({
+          orgId,
+          systemSource: 'zalo_label_sync',
+          action: 'tag_remove_zalo',
+          entityType: 'contact',
+          entityId: f.contactId,
+          details: { tag: labelName, friendId: f.id, accountId, trigger: 'sync' },
+        });
+      }
+    }
   }
 
   return {
