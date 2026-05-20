@@ -48,6 +48,14 @@ model Organization {
   // Phase 6+ — Inbox Triage Filter relations
   accountFolders       AccountFolder[]
   savedFilterPresets   SavedFilterPreset[]
+  // Phase 7 — Automation framework (Block / Sequence / Trigger / Broadcast / Campaign / Task)
+  blocks               Block[]
+  blockFolders         BlockFolder[]
+  automationSequences  AutomationSequence[]
+  automationTriggers   AutomationTrigger[]
+  automationBroadcasts AutomationBroadcast[]
+  automationCampaigns  AutomationCampaign[]
+  automationTasks      AutomationTask[]
 
   @@map("organizations")
 }
@@ -94,6 +102,13 @@ model User {
   // Phase 6+ — Inbox Triage Filter (per-user)
   accountFolders            AccountFolder[]
   savedFilterPresets        SavedFilterPreset[]
+  // Phase 7 — Automation framework (createdBy backrefs)
+  createdBlocks             Block[]                @relation("BlockCreatedBy")
+  createdBlockFolders       BlockFolder[]          @relation("BlockFolderCreatedBy")
+  ownedBlockFolders         BlockFolder[]          @relation("BlockFolderOwnerUser")
+  createdSequences          AutomationSequence[]   @relation("SequenceCreatedBy")
+  createdTriggers           AutomationTrigger[]    @relation("TriggerCreatedBy")
+  createdBroadcasts         AutomationBroadcast[]  @relation("BroadcastCreatedBy")
 
   @@map("users")
 }
@@ -124,6 +139,18 @@ model ZaloAccount {
   crmTagGroups       CrmTagGroup[]
   // Phase 6+ — Inbox Triage Filter (junction folder membership)
   folderMembers      AccountFolderMember[]
+  // Phase 7 — Automation framework
+  ownedBlocks        Block[]               @relation("BlockOwnerNick")
+  ownedBlockFolders  BlockFolder[]         @relation("BlockFolderOwnerNick")
+  assignedTasks      AutomationTask[]      @relation("TaskAssignedNick")
+
+  // Phase 7 — Per-nick automation caps (configurable, default theo memory rule:
+  //   300 msg/day/nick, 30-50 friend-add/day/nick)
+  dailyFriendAddCap  Int                   @default(30)  @map("daily_friend_add_cap")
+  dailyMessageCap    Int                   @default(300) @map("daily_message_cap")
+  // Per-nick throttle gate cross-campaign (memory: project_zalocrm_per_nick_throttle_gate)
+  lastFriendReqSentAt DateTime?            @map("last_friend_req_sent_at")
+  lastMessageSentAt   DateTime?            @map("last_message_sent_at")
 
   @@map("zalo_accounts")
 }
@@ -249,6 +276,8 @@ model Contact {
   attempts          FriendshipAttempt[]
   friends           Friend[]
   contactNotes      Note[]
+  // Phase 7 — Automation framework
+  automationTasks   AutomationTask[]
 
   // Per-Contact counters (cache from Friend rows; updated by friend-aggregate hooks)
   acceptedNicksCount Int @default(0) @map("accepted_nicks_count")
@@ -1288,4 +1317,267 @@ model SavedFilterPreset {
   @@unique([userId, name])
   @@index([orgId, userId, sortOrder])
   @@map("saved_filter_presets")
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE 7 — Automation Framework
+//
+// Architecture (anh đã chốt 2026-05-20):
+//   ─ Authoring layer (user tạo): BlockFolder → Block ← Sequence/Trigger/Broadcast
+//   ─ Runtime layer (engine):     AutomationCampaign → AutomationTask
+//   ─ Snapshot rule: AutomationTask.blockSnapshot frozen lúc enroll → edit Block
+//     KHÔNG ảnh hưởng task đang chạy (có nút Re-sync để force update khi cần)
+//   ─ Reuse: FriendshipAttempt cho request_friend action outcome log
+//   ─ Channel focus phase này: 'zalo_user' (per-nick personal account)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Folder tổ chức Block — pattern smax.ai (folder theo sale: PHÚ, THÀNH, NGỌC...).
+// `ownerNickId` optional: nếu bind 1 nick → block trong folder mặc định runtime
+// dispatch qua nick đó. `ownerUserId` optional: folder cá nhân của 1 sale CRM.
+model BlockFolder {
+  id          String   @id @default(uuid())
+  orgId       String   @map("org_id")
+  name        String
+  parentId    String?  @map("parent_id")
+  ownerNickId String?  @map("owner_nick_id")
+  ownerUserId String?  @map("owner_user_id")
+  createdById String   @map("created_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  org         Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  parent      BlockFolder? @relation("BlockFolderNested", fields: [parentId], references: [id], onDelete: SetNull)
+  children    BlockFolder[] @relation("BlockFolderNested")
+  ownerNick   ZaloAccount? @relation("BlockFolderOwnerNick", fields: [ownerNickId], references: [id], onDelete: SetNull)
+  ownerUser   User?        @relation("BlockFolderOwnerUser", fields: [ownerUserId], references: [id], onDelete: SetNull)
+  createdBy   User         @relation("BlockFolderCreatedBy", fields: [createdById], references: [id])
+  blocks      Block[]
+
+  @@index([orgId, ownerNickId])
+  @@index([orgId, ownerUserId])
+  @@index([parentId])
+  @@map("block_folders")
+}
+
+// Block — atomic content/action unit. ENTITY TRUNG TÂM:
+// được Sequence.steps[].blockId, Broadcast.blockId, Trigger.blockId tham chiếu.
+// `content` JSON shape theo `actionType`:
+//   request_friend  → { greetingVariants: string[] }
+//   send_message    → { textVariants: string[], attachments?: [{ kind, url, caption? }] }
+//   update_status   → { statusId: string, condition?: {...} }
+// `isShared`: false = chỉ owner dùng (block cá nhân của sale), true = mọi sale dùng.
+// `usageCount` cache để UI hiện badge "đang dùng trong N sequence/broadcast".
+// `archivedAt`: soft delete — block bị archive vẫn giữ snapshot trong task đang chạy.
+model Block {
+  id           String    @id @default(uuid())
+  orgId        String    @map("org_id")
+  folderId     String?   @map("folder_id")
+  name         String
+  channel      String    @default("zalo_user")
+  actionType   String    @map("action_type") // 'request_friend' | 'send_message' | 'update_status' | ...
+  content      Json      @default("{}")
+  ownerNickId  String?   @map("owner_nick_id")
+  isShared     Boolean   @default(true) @map("is_shared")
+  usageCount   Int       @default(0) @map("usage_count")
+  lastUsedAt   DateTime? @map("last_used_at")
+  archivedAt   DateTime? @map("archived_at")
+  createdById  String    @map("created_by_id")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  org       Organization     @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  folder    BlockFolder?     @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  ownerNick ZaloAccount?     @relation("BlockOwnerNick", fields: [ownerNickId], references: [id], onDelete: SetNull)
+  createdBy User             @relation("BlockCreatedBy", fields: [createdById], references: [id])
+  tasks     AutomationTask[]
+
+  @@index([orgId, channel, actionType])
+  @@index([orgId, archivedAt])
+  @@index([folderId])
+  @@map("blocks")
+}
+
+// Sequence — multi-step drip flow. `steps` là array có cấu trúc:
+//   [{ stepId, blockId, delayMinutes, exitCondition? }, ...]
+// Delay tính từ thời điểm step trước hoàn thành. delayMinutes=0 cho step đầu.
+// `runtimeRules` (chốt từ memory):
+//   { allowedHourRange: [6, 22],
+//     randomDelayPerSend: { min: 15, max: 45 },
+//     perNickThrottle: true,
+//     crossNickRecencyDays: 30,
+//     stopOnAccept: true }
+model AutomationSequence {
+  id              String   @id @default(uuid())
+  orgId           String   @map("org_id")
+  name            String
+  description     String?
+  channel         String   @default("zalo_user")
+  steps           Json     @default("[]")
+  runtimeRules    Json     @default("{}") @map("runtime_rules")
+  // Cached stats — refresh từ AutomationTask aggregate
+  enrolledCount   Int      @default(0) @map("enrolled_count")
+  completedCount  Int      @default(0) @map("completed_count")
+  failedCount     Int      @default(0) @map("failed_count")
+  enabled         Boolean  @default(true)
+  createdById     String   @map("created_by_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  org       Organization        @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  createdBy User                @relation("SequenceCreatedBy", fields: [createdById], references: [id])
+  triggers  AutomationTrigger[] @relation("TriggerSequence")
+  campaigns AutomationCampaign[] @relation("CampaignSequence")
+
+  @@index([orgId, channel, enabled])
+  @@map("automation_sequences")
+}
+
+// Trigger — event-based entry catalog. Khi event `eventType` fire + match
+// `eventFilter` + contact match `segmentSpec` → engine materialize 1 Campaign +
+// tạo Task cho contact đó. `bindingKind` polymorphic: chỉ 1 trong 3 FK được set.
+// `ruleOverrides` JSON: override sequence.runtimeRules tại trigger level
+// (vd trigger sinh nhật chỉ chạy giờ 9-18).
+model AutomationTrigger {
+  id              String   @id @default(uuid())
+  orgId           String   @map("org_id")
+  name            String
+  category        String   @default("general") // 'general' | 'keyword' | 'bot_api' | 'livechat' | 'genai'
+  eventType       String   @map("event_type")
+  eventFilter     Json?    @map("event_filter")
+  bindingKind     String   @map("binding_kind") // 'sequence' | 'block' | 'broadcast'
+  sequenceId      String?  @map("sequence_id")
+  blockId         String?  @map("block_id")
+  broadcastId     String?  @map("broadcast_id")
+  segmentSpec     Json?    @map("segment_spec")
+  ruleOverrides   Json?    @map("rule_overrides")
+  enabled         Boolean  @default(true)
+  createdById     String   @map("created_by_id")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  org       Organization         @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  sequence  AutomationSequence?  @relation("TriggerSequence", fields: [sequenceId], references: [id], onDelete: SetNull)
+  broadcast AutomationBroadcast? @relation("TriggerBroadcast", fields: [broadcastId], references: [id], onDelete: SetNull)
+  createdBy User                 @relation("TriggerCreatedBy", fields: [createdById], references: [id])
+  campaigns AutomationCampaign[] @relation("CampaignTrigger")
+
+  @@index([orgId, eventType, enabled])
+  @@index([orgId, category])
+  @@map("automation_triggers")
+}
+
+// Broadcast — one-shot mass send. 1 broadcast = 1 block + 1 segment + schedule.
+// `pacing` áp dụng rate limit per nick (memory: project_zalocrm_rate_limits):
+//   { distributeAcrossNicks: true,
+//     maxPerNickPerHour: 50,           ← dưới cap 300 msg/day/nick
+//     allowedHourRange: [6, 22],
+//     randomDelayBetweenSends: { min: 15, max: 45 } }
+model AutomationBroadcast {
+  id              String    @id @default(uuid())
+  orgId           String    @map("org_id")
+  name            String
+  description     String?
+  channel         String    @default("zalo_user")
+  blockId         String    @map("block_id")
+  segmentSpec     Json      @map("segment_spec")
+  scheduleKind    String    @default("now") @map("schedule_kind") // 'now' | 'scheduled' | 'recurring'
+  scheduledAt     DateTime? @map("scheduled_at")
+  recurringSpec   Json?     @map("recurring_spec")
+  pacing          Json      @default("{}")
+  state           String    @default("draft") // 'draft' | 'scheduled' | 'running' | 'paused' | 'completed' | 'cancelled'
+  totalRecipients Int       @default(0) @map("total_recipients")
+  sentCount       Int       @default(0) @map("sent_count")
+  deliveredCount  Int       @default(0) @map("delivered_count")
+  failedCount     Int       @default(0) @map("failed_count")
+  startedAt       DateTime? @map("started_at")
+  completedAt     DateTime? @map("completed_at")
+  createdById     String    @map("created_by_id")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  org       Organization         @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  createdBy User                 @relation("BroadcastCreatedBy", fields: [createdById], references: [id])
+  triggers  AutomationTrigger[]  @relation("TriggerBroadcast")
+  campaigns AutomationCampaign[] @relation("CampaignBroadcast")
+
+  @@index([orgId, channel, state])
+  @@index([scheduledAt])
+  @@map("automation_broadcasts")
+}
+
+// AutomationCampaign — runtime materialize của Trigger hoặc Broadcast.
+// 1 Trigger có thể sinh nhiều Campaign (mỗi lần event fire một batch).
+// 1 Broadcast = 1 Campaign khi state chuyển running.
+// `segmentSnapshot` chốt contact IDs tại activation (hoặc live re-resolve nếu cần).
+// `rulesSnapshot` frozen runtimeRules → task chạy trong campaign này dùng snapshot
+// này, không bị ảnh hưởng nếu Sequence.runtimeRules edit sau.
+model AutomationCampaign {
+  id               String    @id @default(uuid())
+  orgId            String    @map("org_id")
+  triggerId        String?   @map("trigger_id")
+  broadcastId      String?   @map("broadcast_id")
+  executionKind    String    @map("execution_kind") // 'sequence' | 'single_block' | 'broadcast'
+  sequenceId       String?   @map("sequence_id")
+  blockId          String?   @map("block_id")
+  segmentSnapshot  Json      @map("segment_snapshot")
+  rulesSnapshot    Json      @map("rules_snapshot")
+  state            String    @default("active") // 'active' | 'paused' | 'completed' | 'cancelled'
+  activatedAt      DateTime  @default(now()) @map("activated_at")
+  completedAt      DateTime? @map("completed_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  org       Organization         @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  trigger   AutomationTrigger?   @relation("CampaignTrigger", fields: [triggerId], references: [id], onDelete: SetNull)
+  broadcast AutomationBroadcast? @relation("CampaignBroadcast", fields: [broadcastId], references: [id], onDelete: SetNull)
+  sequence  AutomationSequence?  @relation("CampaignSequence", fields: [sequenceId], references: [id], onDelete: SetNull)
+  tasks     AutomationTask[]
+
+  @@index([orgId, state])
+  @@index([triggerId, state])
+  @@index([broadcastId, state])
+  @@map("automation_campaigns")
+}
+
+// AutomationTask — runtime per-contact per-campaign instance.
+// State machine: queued → running → done | failed | skipped
+// `blockSnapshot` deep copy Block.content lúc task created → edit Block KHÔNG
+// ảnh hưởng task pending (anh chốt Q1). `currentStepIdx` track tiến trình trong
+// sequence; sau khi block hoàn thành, engine advance idx + scheduledAt += delay.
+// `skipReason` enum: 'cap_hit' | 'recency_block' | 'hour_range' | 'stop_on_accept'
+//                  | 'already_friend' | 'no_zalo' | 'block_archived' | 'rule_disabled'
+model AutomationTask {
+  id              String    @id @default(uuid())
+  orgId           String    @map("org_id")
+  campaignId      String    @map("campaign_id")
+  contactId       String    @map("contact_id")
+  // Sequence progress (null cho single_block / broadcast tasks)
+  sequenceId      String?   @map("sequence_id")
+  currentStepIdx  Int?      @map("current_step_idx")
+  currentBlockId  String?   @map("current_block_id")
+  blockSnapshot   Json      @map("block_snapshot")
+  // Scheduling
+  scheduledAt     DateTime  @map("scheduled_at")
+  assignedNickId  String?   @map("assigned_nick_id")
+  // State machine
+  state           String    @default("queued") // 'queued' | 'running' | 'done' | 'failed' | 'skipped'
+  attemptCount    Int       @default(0) @map("attempt_count")
+  outcome         Json?
+  skipReason      String?   @map("skip_reason")
+  errorMessage    String?   @map("error_message")
+  executedAt      DateTime? @map("executed_at")
+  createdAt       DateTime  @default(now()) @map("created_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  org           Organization       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  campaign      AutomationCampaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  contact       Contact            @relation(fields: [contactId], references: [id], onDelete: Cascade)
+  block         Block?             @relation(fields: [currentBlockId], references: [id], onDelete: SetNull)
+  assignedNick  ZaloAccount?       @relation("TaskAssignedNick", fields: [assignedNickId], references: [id], onDelete: SetNull)
+
+  @@index([state, scheduledAt]) // worker pickup
+  @@index([campaignId, contactId])
+  @@index([assignedNickId, executedAt]) // per-nick cap check
+  @@index([contactId, state]) // dashboard query
+  @@map("automation_tasks")
 }
