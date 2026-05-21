@@ -1076,7 +1076,7 @@ if (typeof window !== 'undefined') {
   min-height: 52px;
 }
 .linked-kh-row .av {
-  width: 36px; height: 36px; border-radius: 50%;
+  width: 40px; height: 40px; border-radius: 50%;
   color: #fff;
   display: inline-flex; align-items: center; justify-content: center;
   font-size: 12px; font-weight: 500; flex-shrink: 0;

@@ -27,7 +27,8 @@
         v-for="a in group.items"
         :key="a.id"
         class="row"
-        :style="{ borderLeftColor: saleColor(ownerId(a)).bg }"
+        :class="rowUrgency(a)"
+        :style="{ borderLeftColor: rowUrgency(a) === 'overdue' ? '#dc2626' : saleColor(ownerId(a)).bg }"
         @click="$emit('select-appointment', a)"
       >
         <!-- Col 1: Thời gian -->
@@ -132,6 +133,22 @@ defineEmits<{
 
 function isoDay(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+/**
+ * Urgency tier cho row tint:
+ *   overdue  → bg đỏ nhạt, border-left đỏ (quá hạn + chưa xử lý)
+ *   upcoming → giữ neutral, border-left = saleColor
+ *   done     → opacity 0.65, gạch ngang time
+ * Effective overdue = status='overdue' HOẶC status='scheduled' nhưng đã qua now
+ * (cron flip mỗi 30 phút có lag → UI phải real-time hơn).
+ */
+function rowUrgency(a: Appointment): 'overdue' | 'upcoming' | 'done' {
+  if (a.status === 'completed' || a.status === 'cancelled' || a.status === 'no_show') return 'done';
+  if (a.status === 'overdue') return 'overdue';
+  // scheduled: check effective overdue
+  if (a.status === 'scheduled' && new Date(a.appointmentDate).getTime() < Date.now()) return 'overdue';
+  return 'upcoming';
 }
 
 function fmtTime(a: Appointment): string {
@@ -289,6 +306,21 @@ const grouped = computed(() => {
   transition: background 0.1s, box-shadow 0.1s;
 }
 .row:active { background: var(--at-surface-soft); }
+
+/* Urgency tier tint — overdue (đỏ nhạt) / upcoming (neutral) / done (mờ).
+   Border-left vẫn giữ saleColor (do inline style override), trừ overdue được override
+   thành đỏ ở template để cảnh báo mạnh hơn. */
+.row.overdue {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+.row.overdue .col-time { color: #dc2626; font-weight: 600; }
+.row.done {
+  opacity: 0.65;
+  background: #f8fafc;
+}
+.row.done .col-time { text-decoration: line-through; color: #64748b; }
+.row.done .col-title .title-text { color: var(--at-muted); }
 .row .col { padding: 0 4px; min-width: 0; }
 .col-time { display: flex; flex-direction: column; gap: 2px; }
 .col-customer { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -320,7 +352,7 @@ const grouped = computed(() => {
 }
 
 .col-customer .av {
-  width: 32px; height: 32px;
+  width: 36px; height: 36px;
   border-radius: var(--at-r-pill);
   color: var(--at-on-primary);
   display: grid; place-items: center;
@@ -462,7 +494,7 @@ const grouped = computed(() => {
 
 @media (max-width: 600px) {
   .row { padding: 8px 10px; }
-  .row .col-customer .av { width: 30px; height: 30px; font-size: 11px; }
+  .row .col-customer .av { width: 33px; height: 33px; font-size: 11px; }
   .col-time { font-size: 13px; }
 }
 </style>
