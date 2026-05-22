@@ -1,17 +1,27 @@
 <template>
   <aside class="filter-sidebar" :class="{ collapsed }">
-    <!-- Header: workspace + collapse -->
+    <!-- Header: workspace + privacy lock badge + collapse -->
     <header class="sb-header" :class="{ stacked: collapsed }">
       <div v-if="!collapsed" class="ws">
         <div class="ws-dot">{{ workspaceInitial }}</div>
         <div class="ws-name" :title="workspaceName">{{ workspaceName }}</div>
+        <PrivacyLockBadge v-if="canUsePrivacy" @click="onLockBadgeClick" />
       </div>
-      <div v-else class="ws-dot ws-dot-only">{{ workspaceInitial }}</div>
+      <div v-else class="ws-collapsed-stack">
+        <div class="ws-dot ws-dot-only">{{ workspaceInitial }}</div>
+        <PrivacyLockBadge v-if="canUsePrivacy" @click="onLockBadgeClick" />
+      </div>
       <button class="collapse-btn" :title="collapsed ? 'Mở rộng sidebar' : 'Thu gọn sidebar'" :aria-label="collapsed ? 'Mở rộng sidebar' : 'Thu gọn sidebar'" @click="toggleCollapsed">
         <span v-if="collapsed">»</span>
         <span v-else>‹‹</span>
       </button>
     </header>
+
+    <!-- Privacy unlock dialog (mở từ lock badge) -->
+    <PrivacyUnlockDialog
+      v-model="privacyDialogOpen"
+      :nick="privacyDialogNick"
+    />
 
     <!-- ══════ COLLAPSED MODE ══════ -->
     <div v-if="collapsed" class="c-content">
@@ -718,6 +728,10 @@
 import { ref, computed, onMounted, onUnmounted, reactive, watch } from 'vue';
 import type { AccountFolder, AutoTagKey, ScoreTier, StuckDuration, LastMessageWithin, EngagementPatternKey } from '@/composables/use-inbox-filters';
 import { useCrmTagDefs, cleanTagName, type CrmTagDef } from '@/composables/use-crm-tag-defs';
+import PrivacyLockBadge from '@/components/privacy/PrivacyLockBadge.vue';
+import PrivacyUnlockDialog from '@/components/privacy/PrivacyUnlockDialog.vue';
+import { usePrivacyStore } from '@/stores/privacy';
+import { useAuthStore } from '@/stores/auth';
 
 const props = defineProps<{
   filters: any; // useInboxFilters() return
@@ -736,6 +750,25 @@ defineEmits<{
   'clear-account-filter': [];
   'change': [];
 }>();
+
+// ─── Privacy lock badge ──────────────────────────────────
+// Anh chốt 2026-05-22: badge nằm ngay ô tên user, click → mở PrivacyUnlockDialog.
+// Hiển thị HH:MM countdown khi đã unlock. Badge chỉ hiện khi user có hasPin.
+const _privacyStore = usePrivacyStore();
+const _authStore = useAuthStore();
+const canUsePrivacy = computed(() => !!_authStore.user?.id);
+const privacyDialogOpen = ref(false);
+const privacyDialogNick = computed(() => ({
+  displayName: _authStore.user?.fullName || _authStore.user?.email || 'Bạn',
+  avatarUrl: null,
+  zaloUid: null,
+}));
+async function onLockBadgeClick(_unlocked: boolean) {
+  // Luôn mở dialog. Nếu chưa có PIN, dialog sẽ điều hướng setup trong PrivacyUnlockDialog.
+  // Nếu đã unlock, vẫn mở dialog để user thấy options (extend / lock).
+  await _privacyStore.fetchStatus(true).catch(() => {});
+  privacyDialogOpen.value = true;
+}
 
 // ─── Collapse state ──────────────────────────────────────
 const collapsed = ref(localStorage.getItem('filter-sidebar-collapsed') === '1');
@@ -1210,6 +1243,12 @@ onMounted(async () => {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.ws-collapsed-stack {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
 }
 
 .c-content {
