@@ -91,14 +91,18 @@
 
           <!-- Row 2: nick avatar + nick name | in/out | last online -->
           <div class="ch-row-2">
-            <Avatar
+            <NickAvatarLock
               v-if="conversation.zaloAccount"
-              :src="conversation.zaloAccount.avatarUrl"
-              :name="conversation.zaloAccount.displayName || 'Nick'"
-              :size="22"
-              :gradient-seed="conversation.zaloAccount.id"
-              platform="zalo"
-            />
+              :privacy-mode="conversation.zaloAccount.privacyMode"
+            >
+              <Avatar
+                :src="conversation.zaloAccount.avatarUrl"
+                :name="conversation.zaloAccount.displayName || 'Nick'"
+                :size="22"
+                :gradient-seed="conversation.zaloAccount.id"
+                platform="zalo"
+              />
+            </NickAvatarLock>
             <span class="nick-name" :title="conversation.zaloAccount?.displayName || ''">
               {{ conversation.zaloAccount?.displayName || '—' }}
             </span>
@@ -287,6 +291,7 @@
             v-else
             class="msg-bubble-wrap"
             :class="{ 'msg-privacy-blurred': privacyVisibility.shouldBlurMessage(item.msg, conversation) }"
+            @click="privacyVisibility.shouldBlurMessage(item.msg, conversation) ? onMessageLockClick($event) : null"
           >
             <MessageBubble
               :message="item.msg"
@@ -303,13 +308,10 @@
               @callback="onMessageCallback(item.msg)"
               @open-profile="onOpenProfileFromCard"
             />
-            <div
+            <span
               v-if="privacyVisibility.shouldBlurMessage(item.msg, conversation)"
-              class="msg-privacy-overlay"
-              @click.stop="onPrivacyUnlockRequest"
-            >
-              <span class="lock-pill">🔒 Riêng tư — chỉ chính chủ xem được</span>
-            </div>
+              class="msg-privacy-inline-tag"
+            >🔒 Riêng tư</span>
           </div>
         </template>
 
@@ -329,19 +331,7 @@
       />
 
       <!-- ════════ Input area: toolbar trên textarea (Smax-style) ════════ -->
-      <!-- PRIVACY LOCK 2026-05-22: nick privacy + viewer không phải owner → composer disabled -->
-      <div
-        v-if="!privacyVisibility.canSendInConv(conversation)"
-        class="composer-locked-overlay"
-        @click.stop="onPrivacyUnlockRequest"
-      >
-        <div class="lock-card">
-          <div class="lock-icon-big">🔒</div>
-          <div class="lock-title">Nick này đang bật chế độ Riêng tư</div>
-          <div class="lock-desc">Chỉ chủ nick mới gửi được tin nhắn. Bot và automation vẫn hoạt động bình thường.</div>
-        </div>
-      </div>
-      <div class="input-area" :class="{ 'is-locked': !privacyVisibility.canSendInConv(conversation) }">
+      <div class="input-area">
         <!-- CRM tag pills (Smax-style) — chỉ KH chat 1-1, ẩn ở group -->
         <TagCrmBar
           v-if="conversation.contact && conversation.threadType === 'user'"
@@ -403,8 +393,11 @@
 
         <div class="input-row">
           <!-- Avatar nick đang gửi — OUTSIDE editor (góc trái), halo gradient cam-đỏ-vàng -->
-          <div
+          <NickAvatarLock
             v-if="conversation.zaloAccount"
+            :privacy-mode="conversation.zaloAccount.privacyMode"
+          >
+          <div
             class="nick-avatar-halo"
             :title="`Tin nhắn này được gửi đi từ ${conversation.zaloAccount.displayName || 'nick Zalo'}`"
           >
@@ -417,8 +410,9 @@
               class="sender-nick-avatar"
             />
           </div>
+          </NickAvatarLock>
 
-          <div class="editor-wrap">
+          <div class="editor-wrap" :class="{ 'editor-locked': !privacyVisibility.canSendInConv(conversation) }">
             <QuickTemplatePopup
               :visible="showTemplatePopup"
               :query="templateQuery"
@@ -437,6 +431,14 @@
               @typing="onTypingEvent"
               @paste-image="onPasteImage"
             />
+            <!-- Privacy lock overlay — chỉ phủ input editor, KHÔNG che toolbar bên ngoài -->
+            <div
+              v-if="!privacyVisibility.canSendInConv(conversation)"
+              class="editor-lock-overlay"
+              @click.stop="onComposerLockClick"
+            >
+              <span class="editor-lock-pill">🔒 Riêng tư — chỉ chính chủ nick gửi được tin</span>
+            </div>
           </div>
 
           <!-- Emoji picker (hover) — sát nút Gửi -->
@@ -587,10 +589,15 @@ import EmojiPicker from '@/components/chat/EmojiPicker.vue';
 import QuickTemplatePopup from '@/components/chat/quick-template-popup.vue';
 import MessageBubble from '@/components/chat/message-bubble.vue';
 import { usePrivacyVisibility } from '@/composables/use-privacy-visibility';
+import NickAvatarLock from '@/components/privacy/NickAvatarLock.vue';
 
 const privacyVisibility = usePrivacyVisibility();
-function onPrivacyUnlockRequest() {
-  window.location.href = '/settings/privacy';
+function onMessageLockClick(_e: MouseEvent) {
+  // Anh chốt 2026-05-22: click bubble blur → toast/alert, KHÔNG redirect
+  alert('🔒 Riêng tư.\nChỉ chủ nick mới xem được tin nhắn này.');
+}
+function onComposerLockClick() {
+  alert('🔒 Riêng tư.\nChỉ chủ nick mới gửi được tin nhắn này. Bot và automation vẫn hoạt động bình thường.');
 }
 import StickerPicker from '@/components/chat/StickerPicker.vue';
 import ZaloUserInfoDialog from '@/components/chat/ZaloUserInfoDialog.vue';
@@ -1878,86 +1885,96 @@ watch(() => props.editingMessage?.id, async (id) => {
 }
 
 /* ════════ Privacy blur — message bubble (cột 3) ════════ */
-.msg-bubble-wrap { position: relative; }
-.msg-privacy-blurred > :not(.msg-privacy-overlay) {
+/* Anh chốt 2026-05-22: chỉ blur text + avatar tròn KH, KHÔNG che cả row
+   bằng overlay ngang lớn. Inline tag "🔒 Riêng tư" cạnh bubble. */
+.msg-bubble-wrap { position: relative; display: flex; align-items: flex-start; gap: 6px; }
+.msg-bubble-wrap.msg-privacy-blurred {
+  cursor: pointer;
+}
+/* Blur message bubble content + avatar (target VBubble + Avatar components inside MessageBubble) */
+.msg-privacy-blurred :deep(.message-bubble),
+.msg-privacy-blurred :deep(.bubble-text),
+.msg-privacy-blurred :deep(.bubble-content),
+.msg-privacy-blurred :deep(.v-card),
+.msg-privacy-blurred :deep(.message-text) {
   filter: blur(8px) saturate(0.4);
-  opacity: 0.7;
-  pointer-events: none;
+  opacity: 0.75;
   user-select: none;
   transition: filter 0.2s ease;
 }
-.msg-privacy-blurred:hover > :not(.msg-privacy-overlay) {
+.msg-privacy-blurred :deep(.v-avatar),
+.msg-privacy-blurred :deep(.avatar),
+.msg-privacy-blurred :deep(.bubble-avatar) {
+  filter: blur(6px);
+  opacity: 0.8;
+}
+.msg-privacy-blurred:hover :deep(.message-bubble),
+.msg-privacy-blurred:hover :deep(.bubble-text),
+.msg-privacy-blurred:hover :deep(.bubble-content),
+.msg-privacy-blurred:hover :deep(.v-card) {
   filter: blur(10px) saturate(0.3);
-  opacity: 0.5;
+  opacity: 0.65;
 }
-.msg-privacy-overlay {
-  position: absolute;
-  inset: 0;
-  display: flex;
+/* Inline tag "🔒 Riêng tư" cạnh bubble — nhỏ gọn không che row */
+.msg-privacy-inline-tag {
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  background: linear-gradient(180deg, rgba(251, 230, 220, 0.1), rgba(251, 230, 220, 0.4));
-  border-radius: 8px;
-}
-.msg-privacy-overlay .lock-pill {
-  background: white;
+  gap: 3px;
+  background: #fbe6dc;
   color: #7a2000;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 600;
-  padding: 6px 14px;
+  padding: 3px 8px;
   border-radius: 9999px;
-  border: 1px solid rgba(170, 45, 0, 0.25);
-  box-shadow: 0 2px 8px rgba(170, 45, 0, 0.15);
+  border: 1px solid rgba(170, 45, 0, 0.2);
   white-space: nowrap;
+  align-self: center;
+  flex-shrink: 0;
+  cursor: pointer;
 }
-.msg-privacy-overlay:hover .lock-pill {
+.msg-privacy-inline-tag:hover {
   background: #aa2d00;
   color: white;
   border-color: #aa2d00;
 }
 
-/* ════════ Privacy composer lock (Smax-style lock overlay) ════════ */
-.composer-locked-overlay {
+/* ════════ Privacy composer lock — chỉ phủ input editor ════════ */
+/* Anh chốt 2026-05-22: KHÔNG che cả thanh dưới (toolbar gửi ảnh/file/emoji
+   vẫn visible để future bot/automation buttons), chỉ disable text input. */
+.editor-wrap { position: relative; }
+.editor-wrap.editor-locked .input-editor {
+  filter: blur(3px) saturate(0.4);
+  opacity: 0.4;
+  pointer-events: none;
+  user-select: none;
+}
+.editor-lock-overlay {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  background: rgba(255, 255, 255, 0.92);
-  backdrop-filter: blur(4px);
-  z-index: 10;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.7);
+  backdrop-filter: blur(2px);
+  border-radius: 8px;
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
-  border-top: 1px solid #FBE6DC;
   cursor: pointer;
-  min-height: 100px;
+  z-index: 5;
 }
-.composer-locked-overlay .lock-card {
-  text-align: center;
-  max-width: 480px;
-}
-.composer-locked-overlay .lock-icon-big {
-  font-size: 32px;
-  margin-bottom: 8px;
-}
-.composer-locked-overlay .lock-title {
-  font-size: 14px;
-  font-weight: 700;
+.editor-lock-pill {
+  background: white;
   color: #7a2000;
-  margin-bottom: 4px;
-}
-.composer-locked-overlay .lock-desc {
   font-size: 12px;
-  color: #41454d;
-  line-height: 1.5;
+  font-weight: 600;
+  padding: 8px 18px;
+  border-radius: 9999px;
+  border: 1px solid rgba(170, 45, 0, 0.3);
+  box-shadow: 0 2px 8px rgba(170, 45, 0, 0.15);
+  white-space: nowrap;
 }
-.input-area.is-locked {
-  filter: blur(2px) saturate(0.5);
-  opacity: 0.5;
-  pointer-events: none;
-  user-select: none;
+.editor-lock-overlay:hover .editor-lock-pill {
+  background: #aa2d00;
+  color: white;
+  border-color: #aa2d00;
 }
 
 .empty-state {

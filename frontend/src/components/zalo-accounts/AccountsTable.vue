@@ -36,9 +36,11 @@
           </td>
           <td>
             <div class="name-cell">
-              <div class="avatar" :style="avatarStyle(acct)">
-                {{ initials(acct) }}
-              </div>
+              <NickAvatarLock :privacy-mode="(acct as any).privacyMode">
+                <div class="avatar" :style="avatarStyle(acct)">
+                  {{ initials(acct) }}
+                </div>
+              </NickAvatarLock>
               <div class="info">
                 <div class="nm">
                   {{ acct.displayName || 'Nick chưa đặt tên' }}
@@ -148,6 +150,7 @@
 import { computed } from 'vue';
 import type { EnrichedAccount, UptimeBucket } from '@/composables/use-zalo-accounts-dashboard';
 import UptimeSparkline from './UptimeSparkline.vue';
+import NickAvatarLock from '@/components/privacy/NickAvatarLock.vue';
 
 const props = defineProps<{
   accounts: EnrichedAccount[];

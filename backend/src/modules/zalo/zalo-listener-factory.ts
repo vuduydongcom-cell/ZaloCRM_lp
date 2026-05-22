@@ -303,10 +303,19 @@ export function attachZaloListener(ctx: ListenerContext): void {
       });
 
       if (result) {
+        // PRIVACY 2026-05-22: kèm _privacyMeta để FE non-owner blur ngay realtime
+        const accInfo = await prisma.zaloAccount.findUnique({
+          where: { id: accountId },
+          select: { privacyMode: true, ownerUserId: true },
+        });
         io?.emit('chat:message', {
           accountId,
           message: result.message,
           conversationId: result.conversationId,
+          _privacyMeta: accInfo ? {
+            privacyMode: accInfo.privacyMode,
+            ownerUserId: accInfo.ownerUserId,
+          } : undefined,
         });
       }
     } catch (err) {

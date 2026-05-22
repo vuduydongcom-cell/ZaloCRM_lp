@@ -32,6 +32,8 @@ export interface EnrichedAccount {
   canManage: boolean;
   /** True nếu user hiện tại là owner của nick (chính chủ) */
   isOwnedByMe: boolean;
+  /** Privacy mode của nick — 'main' = bật riêng tư, 'sub' = công khai */
+  privacyMode?: 'main' | 'sub';
   crew: CrewMember[];
   crewCount: number;
   msgToday: number;

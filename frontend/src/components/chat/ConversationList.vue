@@ -100,7 +100,9 @@
           </div>
 
           <div class="ci-preview" :class="`tone-${lastMessagePreviewTone(conv) ?? 'normal'}`">
-            <PrivateBlur v-if="privacyVisibility.shouldBlurConv(conv)" :redacted="true" mode="inline" @unlock-request="onPrivacyUnlockRequest" />
+            <!-- Privacy: click blur preview KHÔNG redirect (tránh nhầm khi click chuyển hội thoại).
+                 Blur thuần visual, không bắt event riêng. -->
+            <PrivateBlur v-if="privacyVisibility.shouldBlurConv(conv)" :redacted="true" mode="inline" />
             <template v-else>{{ lastMessagePreview(conv) }}</template>
           </div>
 
@@ -222,10 +224,6 @@ import PrivateBlur from '@/components/privacy/PrivateBlur.vue';
 import { usePrivacyVisibility } from '@/composables/use-privacy-visibility';
 
 const privacyVisibility = usePrivacyVisibility();
-function onPrivacyUnlockRequest() {
-  // Redirect tới Privacy page để unlock PIN
-  window.location.href = '/settings/privacy';
-}
 
 const props = defineProps<{
   conversations: Conversation[];

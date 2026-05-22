@@ -17,10 +17,20 @@
 -->
 <template>
   <span v-if="!redacted" class="pb-passthrough"><slot /></span>
+  <!-- Inline mode (cột 2 preview) — visual only, KHÔNG bắt click để row click bubble bình thường -->
+  <span
+    v-else-if="mode === 'inline'"
+    class="private-blur mode-inline"
+    :title="lockTitle"
+    aria-hidden="true"
+  >
+    <span class="blur-content">{{ placeholder }}</span>
+    <span class="lock-ico-inline">🔒</span>
+  </span>
+  <!-- Bubble mode — click bắt event, emit unlock-request -->
   <span
     v-else
-    class="private-blur"
-    :class="[`mode-${mode}`]"
+    class="private-blur mode-bubble"
     role="button"
     tabindex="0"
     :title="lockTitle"
@@ -28,8 +38,7 @@
     @keyup.enter="$emit('unlock-request')"
   >
     <span class="blur-content" aria-hidden="true">{{ placeholder }}</span>
-    <span v-if="mode === 'bubble'" class="lock-badge"><span class="lock-ico">🔒</span> Riêng tư</span>
-    <span v-else class="lock-ico-inline">🔒</span>
+    <span class="lock-badge"><span class="lock-ico">🔒</span> Riêng tư</span>
   </span>
 </template>
 

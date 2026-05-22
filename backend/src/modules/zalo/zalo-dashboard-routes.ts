@@ -145,6 +145,7 @@ export async function zaloDashboardRoutes(app: FastifyInstance): Promise<void> {
         phone: true,
         status: true,
         ownerUserId: true,
+        privacyMode: true,
         proxyUrl: true,
         lastConnectedAt: true,
         createdAt: true,
@@ -220,6 +221,7 @@ export async function zaloDashboardRoutes(app: FastifyInstance): Promise<void> {
         createdAt: a.createdAt,
         owner: a.owner,
         ownerUserId: a.ownerUserId,
+        privacyMode: a.privacyMode,
         // RBAC 2026-05-22: gate Action buttons trên frontend
         canManage: canManageAccount(a.ownerUserId, userId, user.role),
         isOwnedByMe: a.ownerUserId === userId,

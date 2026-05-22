@@ -76,6 +76,17 @@ export async function chatAttachmentRoutes(app: FastifyInstance) {
       const instance = zaloPool.getInstance(conversation.zaloAccountId);
       if (!instance?.api) return reply.status(400).send({ error: 'Zalo account not connected' });
 
+      // PRIVACY GUARD 2026-05-22: nick privacy=main → chỉ chính chủ upload được
+      if (conversation.zaloAccount.privacyMode === 'main') {
+        const senderUserId = (user as any).userId ?? user.id;
+        if (conversation.zaloAccount.ownerUserId !== senderUserId) {
+          return reply.status(403).send({
+            error: 'Nick này đang bật Riêng tư — chỉ chính chủ mới gửi được file/ảnh.',
+            code: 'PRIVACY_LOCKED',
+          });
+        }
+      }
+
       const limits = await zaloRateLimiter.checkLimits(conversation.zaloAccountId);
       if (!limits.allowed) return reply.status(429).send({ error: limits.reason });
 
@@ -259,7 +270,16 @@ export async function chatAttachmentRoutes(app: FastifyInstance) {
         });
 
         for (const m of created) {
-          io?.emit('chat:message', { accountId: conversation.zaloAccountId, message: m, conversationId: id });
+          // PRIVACY 2026-05-22: kèm _privacyMeta cho FE realtime blur
+          io?.emit('chat:message', {
+            accountId: conversation.zaloAccountId,
+            message: m,
+            conversationId: id,
+            _privacyMeta: {
+              privacyMode: conversation.zaloAccount.privacyMode,
+              ownerUserId: conversation.zaloAccount.ownerUserId,
+            },
+          });
         }
 
         return { messages: created };
