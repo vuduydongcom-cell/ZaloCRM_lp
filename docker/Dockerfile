@@ -10,14 +10,22 @@ RUN npm run build
 FROM node:20-alpine AS backend-builder
 WORKDIR /app/backend
 COPY backend/package.json backend/package-lock.json ./
-RUN npm ci
+# Dùng `npm install` thay `npm ci` vì lock file đôi khi out of sync với package.json
+# (vd: thêm package mới qua npm install --no-save trong dev). Tradeoff: build chậm hơn ~10s
+# nhưng KHÔNG fail nếu lock drift. Tooling cần regenerate lock sau khi add dep.
+RUN npm install --no-audit --no-fund
 COPY backend/ ./
 RUN DATABASE_URL="postgresql://build:build@localhost:5432/build" npx prisma generate
 RUN npm run build
 
 # ── Stage 3: Production image ────────────────────────────────────────────────
 FROM node:20-alpine
-RUN apk add --no-cache tini ffmpeg
+# tzdata = zoneinfo data cho Asia/Ho_Chi_Minh (memory feedback_timezone_vietnam.md).
+# Trước đây alpine không có → Node process fallback UTC → log + new Date() lệch 7h vs giờ VN.
+RUN apk add --no-cache tini ffmpeg tzdata && \
+    cp /usr/share/zoneinfo/Asia/Ho_Chi_Minh /etc/localtime && \
+    echo "Asia/Ho_Chi_Minh" > /etc/timezone
+ENV TZ=Asia/Ho_Chi_Minh
 WORKDIR /app
 
 # Copy built artefacts
@@ -32,5 +40,7 @@ RUN mkdir -p /var/lib/zalo-crm/files
 
 EXPOSE 3000
 ENTRYPOINT ["/sbin/tini", "--"]
-# Push schema to DB then start server
-CMD ["sh", "-c", "npx prisma db push --accept-data-loss --url \"$DATABASE_URL\" && node dist/app.js"]
+# 2026-06-02: Bỏ "prisma db push --accept-data-loss" — pattern này DROP cột mới
+# (vd scheduled_at) khi schema image cũ hơn DB. Migrations chạy qua "prisma migrate deploy"
+# ở deploy step thay vì auto khi container start.
+CMD ["node", "dist/app.js"]
