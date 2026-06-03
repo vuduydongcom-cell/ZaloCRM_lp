@@ -52,6 +52,20 @@ const emit = defineEmits<{
 type BadgeKind = 'user_crm' | 'bot_automation' | 'bot_ai' | 'bot_system' | null;
 
 const badgeKind = computed<BadgeKind>(() => {
+  // ── Fix 2026-06-03 (Anh báo bug ảnh 2 chat nhóm + Minh Pháp) ──
+  // Badge "Sale CRM" / "Tự động" / "Trợ lý AI" / "Hệ thống" CHỈ áp dụng cho
+  // tin OUTBOUND (senderType='self'). Tin INBOUND từ KH (senderType='contact')
+  // hoặc system (senderType='ai_assistant' với meta.kind=bot_ai là exception)
+  // KHÔNG được render badge này — đã có pill "tên người gửi" riêng ở
+  // message-bubble.vue cho tin inbound.
+  //
+  // Trước fix: tin INBOUND có sent_via='user' (default schema) → badgeKind
+  // trả 'user_crm' → render chip 'Sale CRM · {tên nick}' bên cạnh pill tím
+  // gây nhầm lẫn (anh thấy 2 chip trong 1 dòng).
+  if (props.message.senderType !== 'self') {
+    return null;
+  }
+
   const meta = props.message.metadata?.sender;
   if (meta?.kind) {
     // Legacy 'user_native' → map về 'user_crm' (giữ syncedFromNative flag)
@@ -68,8 +82,7 @@ const badgeKind = computed<BadgeKind>(() => {
 
   // Tin self mà không có sentVia/metadata.sender → vẫn show user_crm
   // (Anh chốt 2026-06-02: LUÔN show badge cho mọi tin outbound)
-  if (props.message.senderType === 'self') return 'user_crm';
-  return null;
+  return 'user_crm';
 });
 
 // Determine syncedFromNative flag (cho icon 🔄 trailing)
