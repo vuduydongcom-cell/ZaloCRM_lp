@@ -429,144 +429,94 @@
               </td>
             </tr>
 
-            <!-- Child row: nick chăm (real data từ /contacts/:id/friendships) -->
-            <tr v-if="expandedId === contact.id" class="child-wrap">
+            <!-- Child row: nick chăm — STRIP LAI ①+② (chốt 2026-06-03, thay bảng 16 cột cũ).
+                 Mỗi nick = 1 strip 3 dòng, viền trái đổi màu theo trạng thái kết bạn,
+                 Friend Tag nhãn chữ (Zalo/Tự gắn/Tự động), không giấu field. -->
+            <tr v-if="expandedId === contact.id" class="exp-row">
               <td :colspan="totalColumnsCount">
-                <div class="child-table-wrap">
+                <div class="deck">
                   <div v-if="friendshipLoading[contact.id]" class="child-empty">Đang tải…</div>
-                  <table v-else-if="childRows(contact).length" class="child-table">
-                    <thead>
-                      <tr>
-                        <th>Nick Zalo (Sale)</th>
-                        <th>Ảnh KH</th>
-                        <th>Tên Zalo + UID</th>
-                        <th>Tên gợi nhớ</th>
-                        <th v-if="visibleChildCols.zaloGlobalId" title="Zalo globalId per identity (toàn cục)">Global ID</th>
-                        <th v-if="visibleChildCols.zaloUsername" title="Zalo username (handle)">Username</th>
-                        <th>Trạng thái KB</th>
-                        <th>Trạng thái KH</th>
-                        <th>Score</th>
-                        <th>Nhãn CRM</th>
-                        <th>Label Zalo</th>
-                        <th>KH nhắn cuối</th>
-                        <th>Sale nhắn cuối</th>
-                        <th>In/Out</th>
-                        <th>Là bạn từ</th>
-                        <th>Action</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr v-for="(row, idx) in childRows(contact)" :key="row.id" :class="{ winner: idx === 0 }">
-                        <td>
-                          <div class="nick-cell">
-                            <Avatar :src="row.nickAvatarUrl" :name="row.nickName" :size="26" :gradient-seed="row.id" platform="zalo" />
-                            <div class="two-line">
-                              <span class="line1">
-                                {{ row.nickName }}
-                                <span v-if="idx === 0" class="winner-badge">🏆</span>
-                              </span>
-                              <span class="line2">{{ row.salePhone }} · {{ row.saleName }}</span>
-                            </div>
-                          </div>
-                        </td>
-                        <td>
-                          <Avatar :src="row.zaloAvatarUrl || contact.avatarUrl" :name="row.zaloName || contact.fullName || '?'" :size="32" :gradient-seed="row.id" />
-                        </td>
-                        <td>
-                          <div class="two-line">
-                            <span class="line1">{{ row.zaloName || '—' }}</span>
-                            <span class="uid">{{ row.zaloUid || 'chưa lấy' }}</span>
-                          </div>
-                        </td>
-                        <td>
+                  <template v-else-if="childRows(contact).length">
+                    <div class="deck-head">{{ childRows(contact).length }} NICK ĐANG CHĂM KHÁCH NÀY</div>
+                    <div
+                      v-for="(row, idx) in childRows(contact)" :key="row.id"
+                      class="strip" :class="[stripKbClass(row.relationshipKind), { winner: idx === 0 }]"
+                    >
+                      <!-- Dòng 1: avatar + tên nick + winner + KB + chat + tên nhớ + score -->
+                      <div class="s-r1">
+                        <Avatar :src="row.nickAvatarUrl" :name="row.nickName" :size="28" :gradient-seed="row.id" platform="zalo" />
+                        <span class="nm">{{ row.nickName }}</span>
+                        <span v-if="idx === 0" class="winbadge">🏆 Nick chính</span>
+                        <span class="kb" :class="kbCClass(row.relationshipKind)">{{ kindLabel(row.relationshipKind) }}</span>
+                        <span class="chatdot" :class="{ off: !row.hasConversation }">
+                          {{ row.hasConversation ? '💬 đang chat' : 'ø chưa chat' }}
+                        </span>
+                        <span class="alias-wrap">
+                          <span class="alias-lbl">Tên nhớ</span>
                           <input
-                            class="alias-input"
+                            class="alias-in"
                             :value="row.aliasInNick || ''"
-                            placeholder="— Tên gợi nhớ —"
-                            :title="'Sync 2-chiều với Zalo Real. Đổi ở đây → push qua Zalo của Sale.'"
+                            placeholder="— chưa đặt —"
+                            title="Đồng bộ 2 chiều với Zalo. Đổi ở đây → push qua Zalo của Sale."
+                            @click.stop
                             @change="onFriendAliasChange(row, ($event.target as HTMLInputElement).value)"
                           />
-                        </td>
-                        <td v-if="visibleChildCols.zaloGlobalId">
-                          <code v-if="row.zaloGlobalId" class="uid-cell" :title="row.zaloGlobalId">{{ row.zaloGlobalId.slice(0, 10) }}…</code>
-                          <span v-else class="empty">—</span>
-                        </td>
-                        <td v-if="visibleChildCols.zaloUsername">
-                          <span v-if="row.zaloUsername" class="uid-cell">@{{ row.zaloUsername }}</span>
-                          <span v-else class="empty">—</span>
-                        </td>
-                        <td>
-                          <div class="kb-cell">
-                            <span :class="['chip', kindChipClass(row.relationshipKind)]">
-                              {{ kindLabel(row.relationshipKind) }}
-                            </span>
-                            <span
-                              v-if="row.hasConversation"
-                              class="chip-conv chip-conv--on"
-                              title="Đã từng nhắn 1-1 với KH qua nick này"
-                            >💬 đang chat</span>
-                            <span
-                              v-else
-                              class="chip-conv chip-conv--off"
-                              title="Chỉ kết bạn Zalo, chưa có hội thoại 1-1 nào"
-                            >ø chỉ KB</span>
-                          </div>
-                        </td>
-                        <td>
-                          <span
-                            v-if="row.statusRef"
-                            class="chip status-edit-chip"
-                            :style="{ background: chipBg(row.statusRef.color), color: chipFg(row.statusRef.color) }"
-                            :title="'Click đổi status'"
-                            @click="openFriendStatusEdit(row)"
-                          >{{ row.statusRef.name }}</span>
-                          <span v-else class="empty" @click="openFriendStatusEdit(row)" style="cursor:pointer">— đặt —</span>
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            class="score-input"
-                            :value="row.leadScore"
-                            min="0" max="100"
-                            @change="onFriendScoreChange(row, ($event.target as HTMLInputElement).value)"
-                            :title="'Score per-nick này. Cha = AVG.'"
-                          />
-                        </td>
-                        <td>
-                          <div class="tag-cell">
-                            <span v-for="t in row.crmTagsPerNick" :key="t" class="chip chip-info">{{ t }}</span>
-                            <span v-if="!row.crmTagsPerNick.length" class="empty">—</span>
-                          </div>
-                        </td>
-                        <td>
-                          <div class="tag-cell">
-                            <span v-for="lbl in row.zaloLabels" :key="lbl" class="chip chip-orange-soft">{{ lbl }}</span>
-                            <span v-if="!row.zaloLabels.length" class="empty">—</span>
-                          </div>
-                        </td>
-                        <td>
-                          <span v-if="row.lastInboundAt" class="cell-strong">{{ formatRecentDateTime(row.lastInboundAt) }}</span>
-                          <span v-else class="empty">—</span>
-                        </td>
-                        <td>
-                          <span v-if="row.lastOutboundAt" class="cell-strong">{{ formatRecentDateTime(row.lastOutboundAt) }}</span>
-                          <span v-else class="empty">—</span>
-                        </td>
-                        <td><strong>{{ row.totalInbound }}</strong> / {{ row.totalOutbound }}</td>
-                        <td>{{ row.becameFriendAt || '—' }}</td>
-                        <td>
-                          <div class="action-cell">
-                            <button class="row-action-btn" @click="onChildAction('chat', row)" title="Mở chat">💬</button>
-                            <button class="row-action-btn" @click="onChildAction('auto', row)" title="Automation">⚡</button>
-                            <button class="row-action-btn" @click="onPromoteFriend(row)" title="Tách Con này thành KH Cha riêng">✂</button>
-                          </div>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                  <div v-else class="child-empty">
-                    KH này chưa có nick CRM nào chăm.
-                  </div>
+                          <span class="alias-sync" title="Đồng bộ 2 chiều với Zalo">⇄ Zalo</span>
+                        </span>
+                        <input
+                          type="number" class="miniscore-input"
+                          :class="scoreChipClass(row.leadScore)"
+                          :value="row.leadScore" min="0" max="100"
+                          title="Score per-nick. Cha = AVG."
+                          @click.stop
+                          @change="onFriendScoreChange(row, ($event.target as HTMLInputElement).value)"
+                        />
+                      </div>
+                      <!-- Dòng 2: sale + trạng thái KH + Friend Tag (nhãn nhóm) + số liệu -->
+                      <div class="s-r2">
+                        <span class="sale">Sale <b>{{ row.saleName }}</b><span v-if="row.becameFriendAt"> · bạn {{ row.becameFriendAt }}</span></span>
+                        <span
+                          v-if="row.statusRef"
+                          class="chip status-edit-chip"
+                          :style="{ background: chipBg(row.statusRef.color), color: chipFg(row.statusRef.color) }"
+                          title="Click đổi trạng thái"
+                          @click.stop="openFriendStatusEdit(row)"
+                        >{{ row.statusRef.name }}</span>
+                        <span v-else class="empty" style="cursor:pointer" @click.stop="openFriendStatusEdit(row)">— đặt trạng thái —</span>
+                        <span class="tagsec">
+                          <span class="tlbl">Tag</span>
+                          <span v-for="t in friendTagsOf(row)" :key="t.key" class="ftag" :class="t.cls" :title="t.group">{{ t.label }}</span>
+                          <span v-if="!friendTagsOf(row).length" class="empty">—</span>
+                        </span>
+                        <span class="metarow">
+                          <span class="m">📥 <b>{{ row.totalInbound }}</b></span>
+                          <span class="m">📤 <b>{{ row.totalOutbound }}</b></span>
+                        </span>
+                      </div>
+                      <!-- Dòng 3: tin nhắn cuối (nhãn KH/Sale) + action -->
+                      <div class="s-r3">
+                        <span class="msgbox">
+                          <span v-if="row.lastInboundAt" class="msgline">
+                            <span class="who kh">KH</span>
+                            <span class="txt">{{ row.lastInboundPreview ? cleanPreview(row.lastInboundPreview, row.lastInboundType) : '(đã nhắn)' }}</span>
+                            <span class="tm">{{ formatRecentDateTime(row.lastInboundAt) }}</span>
+                          </span>
+                          <span v-if="row.lastOutboundAt" class="msgline">
+                            <span class="who sale">Sale</span>
+                            <span class="txt">{{ row.lastOutboundPreview ? cleanPreview(row.lastOutboundPreview, row.lastOutboundType) : '(đã nhắn)' }}</span>
+                            <span class="tm">{{ formatRecentDateTime(row.lastOutboundAt) }}</span>
+                          </span>
+                          <span v-if="!row.lastInboundAt && !row.lastOutboundAt" class="empty" style="font-size:11px">Chưa có tin nhắn</span>
+                        </span>
+                        <span class="actbtns">
+                          <button class="primary" @click.stop="onChildAction('chat', row)">💬 Chat</button>
+                          <button @click.stop="onChildAction('auto', row)">⚡ Marketing</button>
+                          <button @click.stop="onPromoteFriend(row)" title="Tách nick này thành KH Cha riêng">✂ Tách</button>
+                        </span>
+                      </div>
+                    </div>
+                  </template>
+                  <div v-else class="child-empty">KH này chưa có nick CRM nào chăm.</div>
                 </div>
               </td>
             </tr>
@@ -1025,6 +975,10 @@ interface ApiFriendship {
   becameFriendAt: string | null;
   lastInboundAt: string | null;
   lastOutboundAt: string | null;
+  lastInboundPreview: string | null;
+  lastInboundType: string | null;
+  lastOutboundPreview: string | null;
+  lastOutboundType: string | null;
   totalInbound: number;
   totalOutbound: number;
   leadScore: number;
@@ -1084,6 +1038,10 @@ function mapFriendshipToChildRow(f: ApiFriendship, contact: Contact): ChildRow {
     zaloLabels: labels,
     lastInboundAt: f.lastInboundAt,
     lastOutboundAt: f.lastOutboundAt,
+    lastInboundPreview: f.lastInboundPreview ?? null,
+    lastInboundType: f.lastInboundType ?? null,
+    lastOutboundPreview: f.lastOutboundPreview ?? null,
+    lastOutboundType: f.lastOutboundType ?? null,
     totalInbound: f.totalInbound ?? 0,
     totalOutbound: f.totalOutbound ?? 0,
     becameFriendAt: relativeTime(f.becameFriendAt),
@@ -1324,6 +1282,10 @@ interface ChildRow {
   zaloLabels: string[];
   lastInboundAt: string | null;
   lastOutboundAt: string | null;
+  lastInboundPreview: string | null;
+  lastInboundType: string | null;
+  lastOutboundPreview: string | null;
+  lastOutboundType: string | null;
   totalInbound: number;
   totalOutbound: number;
   becameFriendAt: string | null;
@@ -1352,14 +1314,24 @@ function kindLabel(kind: ChildRow['relationshipKind']): string {
   };
   return map[kind];
 }
-function kindChipClass(kind: ChildRow['relationshipKind']): string {
-  const map: Record<ChildRow['relationshipKind'], string> = {
-    friend: 'chip-success',
-    pending_friend: 'chip-warning',
-    chatting_stranger: 'chip-info',
-    ghost: 'chip-grey',
-  };
-  return map[kind];
+// ── Strip lai ①+② helpers (2026-06-03) ──
+// Viền trái strip đổi màu theo trạng thái kết bạn.
+function stripKbClass(kind: ChildRow['relationshipKind']): string {
+  return { friend: 'kb-yes', pending_friend: 'kb-pending', chatting_stranger: 'kb-info', ghost: 'kb-off' }[kind] || '';
+}
+// Chip trạng thái KB (nền nhạt).
+function kbCClass(kind: ChildRow['relationshipKind']): string {
+  return { friend: 'kb-c-yes', pending_friend: 'kb-c-pending', chatting_stranger: 'kb-c-info', ghost: 'kb-c-off' }[kind] || 'kb-c-off';
+}
+// Friend Tag NHÓM CÓ NHÃN CHỮ (Zalo/Tự gắn/Tự động/Đồng bộ) — thay huy chương 🥇🥈🥉.
+// Nguồn: zaloLabels = Zalo Real (nhãn native), crmTagsPerNick = Manual sale gắn.
+// (Auto-tag / Score-tag chưa có data riêng ở ChildRow → để dành, sau bổ sung.)
+interface FriendTagChip { key: string; label: string; group: string; cls: string }
+function friendTagsOf(row: ChildRow): FriendTagChip[] {
+  const out: FriendTagChip[] = [];
+  for (const lbl of (row.zaloLabels || [])) out.push({ key: 'z:' + lbl, label: lbl, group: 'Nhãn Zalo Real', cls: 'ft-zalo' });
+  for (const t of (row.crmTagsPerNick || [])) out.push({ key: 'm:' + t, label: t, group: 'Nhãn sale tự gắn', cls: 'ft-manual' });
+  return out.slice(0, 5);
 }
 
 async function onChildAction(action: string, row: ChildRow) {
@@ -2408,4 +2380,60 @@ watch(
 .smax-table tbody tr.master-row.row-no-zalo { background: rgba(255, 145, 0, 0.035); }
 .smax-table tbody tr.master-row.row-no-zalo:hover { background: rgba(255, 145, 0, 0.07); }
 .smax-table tbody tr.master-row.row-no-zalo.open { background: var(--smax-primary-soft); }
+
+/* ════════ STRIP LAI ①+② cho nick con xổ inline (chốt 2026-06-03) ════════ */
+.exp-row > td { padding: 0; background: var(--smax-grey-50); }
+.deck { border-left: 4px solid var(--smax-primary); padding: 9px 13px 11px; background: #f7f9fc; }
+.deck-head { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--smax-grey-700); font-weight: 700; margin-bottom: 8px; }
+.strip { background: #fff; border: 1px solid var(--smax-grey-200); border-left: 5px solid var(--smax-grey-300); border-radius: 6px; padding: 9px 12px; margin-bottom: 7px; }
+.strip.kb-yes { border-left-color: var(--smax-success); }
+.strip.kb-pending { border-left-color: var(--smax-warning); }
+.strip.kb-info { border-left-color: var(--smax-info); }
+.strip.kb-off { border-left-color: #9e9e9e; opacity: .72; }
+.strip.winner { background: rgba(0, 200, 83, .045); box-shadow: 0 0 0 1px rgba(0, 200, 83, .18); }
+/* dòng 1 */
+.strip .s-r1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px; }
+.strip .s-r1 .nm { font-weight: 700; font-size: 13px; }
+.strip .winbadge { font-size: 11px; background: rgba(0, 200, 83, .13); color: #1b8a3f; border-radius: 7px; padding: 1px 6px; }
+.strip .kb { display: inline-flex; align-items: center; gap: 3px; padding: 1px 8px; border-radius: 9px; font-size: 11px; font-weight: 600; white-space: nowrap; }
+.kb-c-yes { background: rgba(0, 200, 83, .15); color: #1b8a3f; } .kb-c-pending { background: rgba(255, 145, 0, .16); color: #ef6c00; }
+.kb-c-info { background: rgba(33, 150, 243, .14); color: #1565c0; } .kb-c-off { background: var(--smax-grey-100); color: #9e9e9e; }
+.strip .chatdot { font-size: 11px; color: #1b8a3f; } .strip .chatdot.off { color: #9e9e9e; }
+.strip .alias-wrap { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.strip .alias-lbl { font-size: 10px; color: var(--smax-grey-400); }
+.strip .alias-in { border: 1px solid var(--smax-grey-300); border-radius: 5px; padding: 3px 8px; font-size: 12px; font-family: inherit; background: #fff; width: 180px; }
+.strip .alias-in:focus { outline: 1.5px solid var(--smax-primary); border-color: var(--smax-primary); }
+.strip .alias-sync { font-size: 10px; color: #1565c0; cursor: pointer; }
+.strip .miniscore-input { width: 48px; text-align: center; padding: 2px 4px; border: 1px solid var(--smax-grey-300); border-radius: 5px; font-weight: 700; font-size: 12px; }
+.strip .miniscore-input.chip-success { background: rgba(0,200,83,.15); color: #1b8a3f; }
+.strip .miniscore-input.chip-warning { background: rgba(255,145,0,.15); color: #ef6c00; }
+.strip .miniscore-input.chip-error { background: rgba(255,61,0,.13); color: #c62828; }
+/* dòng 2 */
+.strip .s-r2 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 6px; font-size: 11.5px; }
+.strip .s-r2 .sale { color: var(--smax-grey-700); } .strip .s-r2 .sale b { color: var(--smax-text); }
+.strip .tagsec { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
+.strip .tagsec .tlbl { font-size: 9.5px; color: var(--smax-grey-400); text-transform: uppercase; font-weight: 600; }
+.strip .ftag { display: inline-flex; align-items: center; gap: 2px; padding: 1px 7px; border-radius: 9px; font-size: 10.5px; font-weight: 600; border: 1px solid; }
+.strip .ft-zalo { background: #fff8f0; border-color: #ff9800; color: #ef6c00; }
+.strip .ft-manual { background: #f0f7ff; border-color: #42a5f5; color: #1565c0; }
+.strip .ft-auto { background: #faf3fc; border-color: #ce93d8; color: #6a1b9a; }
+.strip .ft-score { background: rgba(0,200,83,.08); border-color: #66bb6a; color: #1b8a3f; }
+.strip .ft-sync { background: var(--smax-grey-100); border-color: var(--smax-grey-300); color: var(--smax-grey-700); }
+.strip .metarow { display: flex; gap: 11px; flex-wrap: wrap; margin-left: auto; }
+.strip .metarow .m { display: inline-flex; align-items: center; gap: 3px; color: var(--smax-grey-700); }
+.strip .metarow .m b { color: var(--smax-text); }
+/* dòng 3 */
+.strip .s-r3 { display: flex; align-items: center; gap: 12px; }
+.strip .msgbox { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.strip .msgline { font-size: 11px; display: flex; gap: 5px; align-items: baseline; }
+.strip .msgline .who { flex-shrink: 0; font-size: 10px; font-weight: 600; border-radius: 4px; padding: 0 5px; }
+.strip .who.kh { background: rgba(0, 200, 83, .12); color: #1b8a3f; } .strip .who.sale { background: rgba(33, 150, 243, .1); color: #1565c0; }
+.strip .msgline .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--smax-text); }
+.strip .msgline .tm { flex-shrink: 0; color: var(--smax-grey-400); font-size: 10px; }
+.strip .actbtns { display: flex; gap: 5px; flex-shrink: 0; }
+.strip .actbtns button { border: 1px solid var(--smax-grey-300); background: #fff; border-radius: 5px; padding: 5px 11px; font-size: 11px; cursor: pointer; color: var(--smax-grey-700); white-space: nowrap; }
+.strip .actbtns button.primary { background: var(--smax-primary); color: #fff; border-color: var(--smax-primary); }
+.strip .actbtns button:hover { border-color: var(--smax-primary); color: var(--smax-primary); }
+.strip .actbtns button.primary:hover { background: var(--smax-primary-hover); color: #fff; }
+.child-empty { padding: 9px 13px; font-size: 12px; color: var(--smax-grey-700); }
 </style>
