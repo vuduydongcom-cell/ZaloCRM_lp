@@ -264,7 +264,9 @@
           />
 
           <!-- Default text — parse @mention + bullets + linebreaks -->
-          <div v-else class="text-content" v-html="formattedText" />
+          <!-- Anh chốt 2026-06-03: click vào mention → load info user giống click avatar.
+               Event delegation: bắt click trên container, check target có class .mention + data-uid. -->
+          <div v-else class="text-content" v-html="formattedText" @click="onMentionClick" />
 
         </template>
 
@@ -570,6 +572,24 @@ function highlightTextRegex(raw: string): string {
 
 function highlightText(raw: string): string {
   return highlightTextRegex(raw);
+}
+
+/**
+ * Anh chốt 2026-06-03: click vào mention span → load info user (giống avatar click).
+ * Event delegation: bắt click trên div container, check target có class .mention + data-uid.
+ * Stop propagation để không trigger sender-click của bubble cha.
+ */
+function onMentionClick(ev: MouseEvent): void {
+  const target = ev.target as HTMLElement | null;
+  if (!target) return;
+  // Walk up tới element gần nhất có class .mention (vì <strong>/<em> bên trong có thể là target)
+  const mentionEl = target.closest('.mention') as HTMLElement | null;
+  if (!mentionEl) return;
+  const uid = mentionEl.dataset.uid;
+  if (!uid) return;
+  ev.stopPropagation();
+  // Emit open-profile (event handler ZaloUserInfoDialog đã có sẵn ở MessageThread.vue)
+  emit('open-profile', uid);
 }
 
 const formattedText = computed(() => {
@@ -1109,6 +1129,14 @@ function openFile(href: string) {
   background: var(--smax-primary-soft, #e3f2fd);
   padding: 0 4px;
   border-radius: 3px;
+  /* Anh chốt 2026-06-03: mention click được như avatar/tên sender.
+     Cursor pointer + hover effect để user biết click được. */
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+:deep(.mention:hover) {
+  background: var(--smax-primary, #2962ff);
+  color: white;
 }
 :deep(.link) {
   color: var(--smax-primary, #2962ff);
