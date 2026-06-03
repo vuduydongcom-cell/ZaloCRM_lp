@@ -678,75 +678,41 @@
             </div>
           </div>
 
-          <!-- Filter bar — 2 hàng -->
-          <div class="filter-bar">
-            <!-- Row 1: range, search, KH select, Nick select, reset -->
-            <div class="filter-row">
-              <span class="filter-label">Khoảng</span>
-              <div class="range-btns">
-                <button
-                  v-for="r in RANGE_OPTIONS"
-                  :key="r.key"
-                  class="range-btn"
-                  :class="{ active: logRange === r.key }"
-                  @click="setLogRange(r.key)"
-                >
-                  {{ r.label }}
-                </button>
-              </div>
-              <input
-                v-show="logRange === 'custom'"
-                v-model="logFilter.from"
-                type="date"
-                class="filter-input filter-input-date"
-              />
-              <input
-                v-show="logRange === 'custom'"
-                v-model="logFilter.to"
-                type="date"
-                class="filter-input filter-input-date"
-              />
-
-              <input
-                v-model="logFilter.q"
-                type="text"
-                class="filter-input filter-input-search"
-                placeholder="🔍 Tìm tên KH, SĐT, nick, mã tin nhắn…"
-              />
-
-              <select v-model="logFilter.khId" class="filter-select">
-                <option value="">👤 Tất cả khách hàng</option>
-                <option v-for="kh in distinctKhInLog" :key="kh.id" :value="kh.id">
-                  {{ kh.name }}
-                </option>
-              </select>
-
-              <select v-model="logFilter.nickId" class="filter-select">
-                <option value="">📱 Tất cả nick</option>
-                <option v-for="n in distinctNicksInLog" :key="n.id" :value="n.id">
-                  {{ n.name }}
-                </option>
-              </select>
-
-              <span class="filter-spacer"></span>
-              <button class="filter-reset" @click="resetLogFilter">↺ Đặt lại lọc</button>
+          <!-- Filter bar — 1 hàng (Anh chốt 2026-06-03 — gọn, responsive wrap)
+               4 element cơ bản: range chip + search + select loại + reset.
+               Bỏ KH/Nick dropdown riêng (search cover) + custom date (4 preset đủ) +
+               11 chip row 2 (gộp vào select Loại). -->
+          <div class="filter-bar filter-bar-single">
+            <div class="range-btns">
+              <button
+                v-for="r in RANGE_OPTIONS"
+                :key="r.key"
+                class="range-btn"
+                :class="{ active: logRange === r.key }"
+                @click="setLogRange(r.key)"
+              >
+                {{ r.label }}
+              </button>
             </div>
 
-            <!-- Row 2: 10 chip type -->
-            <div class="filter-row filter-row-chips">
-              <span class="filter-label">Loại</span>
-              <div class="chips log-type-chips">
-                <span
-                  v-for="chip in logTypeChips"
-                  :key="chip.key"
-                  class="chip"
-                  :class="{ active: logFilter.type === chip.key }"
-                  @click="logFilter.type = chip.key"
-                >
-                  {{ chip.label }} <span class="count">{{ formatNum(chip.count) }}</span>
-                </span>
-              </div>
-            </div>
+            <input
+              v-model="logFilter.q"
+              type="text"
+              class="filter-input filter-input-search"
+              placeholder="🔍 Tìm tên KH, SĐT, nick, mã tin nhắn…"
+            />
+
+            <select v-model="logFilter.type" class="filter-select filter-select-type">
+              <option
+                v-for="chip in logTypeChips"
+                :key="chip.key"
+                :value="chip.key"
+              >
+                {{ chip.label }} ({{ formatNum(chip.count) }})
+              </option>
+            </select>
+
+            <button class="filter-reset" @click="resetLogFilter" title="Đặt lại lọc">↺</button>
           </div>
 
           <div class="ev-table-wrap">
@@ -1064,14 +1030,14 @@ const logFilter = ref<{
   nickId: '',
 });
 
-// Option B 2026-06-03 — range preset chips (24h / 7 ngày / 30 ngày / Tất cả / Tự chọn).
-type LogRangeKey = '24h' | '7d' | '30d' | 'all' | 'custom';
+// Option B v2 2026-06-03 — range preset chips (24h / 7 ngày / 30 ngày / Tất cả).
+// Bỏ 'custom' (date input rườm rà) — 4 preset đủ dùng theo Anh chốt.
+type LogRangeKey = '24h' | '7d' | '30d' | 'all';
 const RANGE_OPTIONS: { key: LogRangeKey; label: string }[] = [
   { key: '24h', label: '24h' },
   { key: '7d', label: '7 ngày' },
   { key: '30d', label: '30 ngày' },
   { key: 'all', label: 'Tất cả' },
-  { key: 'custom', label: 'Tự chọn' },
 ];
 const logRange = ref<LogRangeKey>('7d');
 
@@ -1311,26 +1277,6 @@ const logTypeChips = computed<{ key: string; label: string; count: number }[]>((
     { key: 'customer_block',     label: '🚫 Chặn',            count: countBy('customer_block') },
     { key: 'converted_lead',     label: '⭐ Chuyển lead',     count: countBy('converted_lead') },
   ];
-});
-
-// Distinct KH + nick từ logEvents page hiện tại — dùng cho 2 dropdown filter.
-const distinctKhInLog = computed<{ id: string; name: string }[]>(() => {
-  const seen = new Map<string, string>();
-  for (const ev of logEvents.value) {
-    if (ev.customerName) {
-      // Dùng tên làm id tạm (BE chưa expose customerId trong LogEvent).
-      // Khi BE bổ sung sẽ swap sang ev.customerId.
-      if (!seen.has(ev.customerName)) seen.set(ev.customerName, ev.customerName);
-    }
-  }
-  return Array.from(seen.entries()).map(([id, name]) => ({ id, name }));
-});
-const distinctNicksInLog = computed<{ id: string; name: string }[]>(() => {
-  const seen = new Map<string, string>();
-  for (const ev of logEvents.value) {
-    if (ev.nickName && !seen.has(ev.nickName)) seen.set(ev.nickName, ev.nickName);
-  }
-  return Array.from(seen.entries()).map(([id, name]) => ({ id, name }));
 });
 
 // Bulk select helpers — selectAll = mọi row trên page hiện tại đều selected.
@@ -1697,7 +1643,7 @@ watch(
   },
 );
 
-// Option B (2026-06-03) — range preset → set from/to. 'custom' giữ nguyên 2 input date.
+// Option B v2 (2026-06-03) — range preset → set from/to. Chỉ 4 preset.
 function setLogRange(key: LogRangeKey): void {
   logRange.value = key;
   if (key === '24h') {
@@ -1713,7 +1659,6 @@ function setLogRange(key: LogRangeKey): void {
     logFilter.value.from = '';
     logFilter.value.to = '';
   }
-  // custom — không đổi from/to, để user pick.
 }
 function resetLogFilter(): void {
   logRange.value = '7d';
@@ -3006,14 +2951,6 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
   transition: opacity 0.15s ease 0.2s, visibility 0s linear 0.2s;
 }
 
-/* Log tab chip row — full-width, wrap to next line, separator from date/search. */
-.log-type-chips {
-  width: 100%;
-  padding-bottom: 8px;
-  border-bottom: 1px dashed var(--border);
-  margin-bottom: 4px;
-}
-
 /* entries table specifics */
 .entries-table th, .entries-table td { padding: 9px 12px; }
 /* P0-3 2026-05-30 — entry row hover hint cho row-click → /chat. */
@@ -3093,28 +3030,18 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
   font-size: 14px; font-weight: 700; margin: 0;
   color: var(--text-1); display: flex; align-items: center; gap: 6px;
 }
-/* Option B (2026-06-03) — Filter bar 2 hàng (range + search + dropdown + chip type) */
+/* Option B v2 (2026-06-03) — Filter bar 1 hàng responsive
+   4 element: range chip + search + dropdown Loại + reset. Wrap khi <1100px. */
 .filter-bar {
-  padding: 12px 16px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--border);
   background: white;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
-.filter-row {
+.filter-bar-single {
   display: flex;
-  gap: 10px;
   flex-wrap: wrap;
   align-items: center;
-}
-.filter-row-chips { gap: 8px; }
-.filter-label {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text-3);
+  gap: 10px;
 }
 .filter-input,
 .filter-select {
@@ -3132,21 +3059,36 @@ tbody td { padding: 10px 14px; vertical-align: middle; }
   border-color: var(--primary);
   box-shadow: 0 0 0 3px rgba(45, 127, 249, 0.15);
 }
-.filter-input-search { width: 260px; min-width: 240px; }
-.filter-input-date { width: 130px; font-variant-numeric: tabular-nums; }
-.filter-select { min-width: 160px; cursor: pointer; }
-.filter-spacer { flex: 1; }
+.filter-input-search {
+  flex: 1 1 240px;
+  min-width: 200px;
+  max-width: 360px;
+}
+.filter-select-type {
+  flex: 0 0 auto;
+  min-width: 200px;
+  max-width: 260px;
+  cursor: pointer;
+}
 .filter-reset {
-  padding: 6px 12px;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
   background: white;
   border: 1px solid var(--border-strong);
   border-radius: 6px;
-  font-size: 12px;
+  font-size: 14px;
   font-family: inherit;
   color: var(--text-2);
   cursor: pointer;
+  margin-left: auto;
 }
-.filter-reset:hover { background: var(--bg-soft); border-color: var(--text-3); }
+.filter-reset:hover { background: var(--bg-soft); border-color: var(--text-3); color: var(--text-1); }
+@media (max-width: 1100px) {
+  .filter-input-search { max-width: none; }
+  .filter-reset { margin-left: 0; }
+}
 
 /* Range preset buttons (24h / 7 ngày / 30 ngày / Tất cả / Tự chọn) */
 .range-btns {
