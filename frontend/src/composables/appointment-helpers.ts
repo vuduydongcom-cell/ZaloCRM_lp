@@ -12,8 +12,15 @@ export { APPOINTMENT_TYPE_OPTIONS, APPOINTMENT_STATUS_OPTIONS };
 /**
  * Extended appointment fields that the backend may or may not populate yet.
  * UI degrades gracefully when absent.
+ *
+ * Lưu ý tên cột: BE (schema Appointment) dùng assignedUserId / assignedUser — KHÔNG
+ * phải assignedToId. Giữ alias assignedToId/assignedTo (legacy) phòng nơi khác đọc,
+ * nhưng appointmentOwnerId/Name ưu tiên tên cột THẬT (assignedUserId/assignedUser).
  */
 export interface AppointmentExtras {
+  assignedUserId?: string | null;
+  assignedUser?: { id: string; fullName: string | null } | null;
+  // Legacy aliases (giữ tương thích, không phải tên cột DB)
   assignedToId?: string | null;
   assignedTo?: { id: string; fullName: string | null; email: string } | null;
   durationMin?: number | null;
@@ -40,11 +47,18 @@ export function saleColor(userId: string | null | undefined): { bg: string; soft
 }
 
 export function appointmentOwnerId(a: AppointmentEx): string | null {
-  return a.assignedToId || a.statusChangedBy?.id || null;
+  // Ưu tiên tên cột THẬT (assignedUserId), fallback alias legacy + statusChangedBy.
+  return a.assignedUserId || a.assignedUser?.id || a.assignedToId || a.statusChangedBy?.id || null;
 }
 
 export function appointmentOwnerName(a: AppointmentEx): string {
-  return a.assignedTo?.fullName || a.statusChangedBy?.fullName || a.statusChangedBy?.email || 'Chưa gán';
+  return (
+    a.assignedUser?.fullName ||
+    a.assignedTo?.fullName ||
+    a.statusChangedBy?.fullName ||
+    a.statusChangedBy?.email ||
+    'Chưa gán'
+  );
 }
 
 export function typeIcon(type: string): string {
