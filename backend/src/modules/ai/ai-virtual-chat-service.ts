@@ -19,6 +19,8 @@ import { logger } from '../../shared/utils/logger.js';
 import { getAiConfig, getProviderApiKey, generateText } from './ai-service.js';
 import { DEFAULT_VIRTUAL_CHAT_PROMPT } from './prompts/virtual-chat-assistant.js';
 import { safeParseEntities, type ExtractedEntities } from './schemas/extracted-entities.js';
+import { withTenant } from '../../shared/tenant/tenant-context.js';
+import { assertAiCapability, auditAiAction } from './ai-capabilities.js';
 
 const THROTTLE_MS = 5_000;
 const throttleMap = new Map<string, number>(); // in-memory fallback (no Redis)
@@ -35,6 +37,16 @@ interface TriggerInput {
  * trong virtual conv. KHÔNG block HTTP response.
  */
 export async function triggerVirtualChatAiReply(
+  input: TriggerInput,
+  io: Server | null,
+): Promise<void> {
+  // Phase 6 #12 — AI tự hành động in-process: bọc withTenant để MỌI DB op của AI
+  // mang tenant context (qua tenant-guard + RLS khi enforce). AI không vượt mặt
+  // gateway như một user vô danh.
+  await withTenant(input.orgId, () => runVirtualChatAiReply(input, io));
+}
+
+async function runVirtualChatAiReply(
   input: TriggerInput,
   io: Server | null,
 ): Promise<void> {
@@ -114,7 +126,8 @@ export async function triggerVirtualChatAiReply(
       return;
     }
 
-    // 7. Save AI message + emit socket
+    // 7. Save AI message + emit socket — capability check (deny-by-default).
+    assertAiCapability('save_ai_message');
     const localMsgId = `local:${randomUUID()}`;
     const aiMessage = await prisma.message.create({
       data: {
@@ -152,6 +165,9 @@ export async function triggerVirtualChatAiReply(
         confidence: entities?.confidenceScore ?? 0,
       },
     });
+
+    // Audit hành động AI tự động (actorType='bot').
+    auditAiAction(orgId, 'virtual_chat_reply', { conversationId, messageId: aiMessage.id });
 
     const safeMessage = { ...aiMessage, zaloMsgIdNum: null as string | null };
     const conv = await prisma.conversation.findUnique({

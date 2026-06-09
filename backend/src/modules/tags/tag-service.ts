@@ -21,7 +21,7 @@
 
 import type { Tag, TagScope, TagSource } from '@prisma/client';
 import { Prisma as PrismaNS } from '@prisma/client';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { slugifyTag } from '../../shared/tag-slug.js';
 import { markContactAutoTagsDirty } from './contact-autotags-dirty.js';
@@ -173,7 +173,7 @@ export async function addFriendTag(input: AddFriendTagInput): Promise<{ tag: Tag
 
   const result = await retryOnUniqueViolation(
     () =>
-      prisma.$transaction(async (tx) => {
+      tenantTransaction(async (tx) => {
         // 1. Resolve Tag
         let tag: Tag;
         if (input.tagId) {
@@ -260,7 +260,7 @@ export async function removeFriendTag(input: {
   });
   if (!friend) throw new Error('FRIEND_NOT_FOUND');
 
-  const removedTag = await prisma.$transaction(async (tx) => {
+  const removedTag = await tenantTransaction(async (tx) => {
     const existing = await tx.friendTag.findUnique({
       where: { friendId_tagId: { friendId: friend.id, tagId: input.tagId } },
     });
@@ -369,7 +369,7 @@ export async function addCrmTag(input: AddCrmTagInput): Promise<{ tag: Tag; cont
 
   return retryOnUniqueViolation(
     () =>
-      prisma.$transaction(async (tx) => {
+      tenantTransaction(async (tx) => {
         let tag: Tag;
         if (input.tagId) {
           const t = await tx.tag.findUnique({ where: { id: input.tagId } });
@@ -431,7 +431,7 @@ export async function removeCrmTag(input: {
   tagId: string;
   removedBy: string | null;
 }): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     const existing = await tx.contactTag.findUnique({
       where: { contactId_tagId: { contactId: input.contactId, tagId: input.tagId } },
     });
@@ -526,7 +526,7 @@ export async function mergeTags(opts: {
   targetTagId: string;
   mergedBy: string;
 }): Promise<{ moved: number; skipped: string | null }> {
-  return prisma.$transaction(async (tx) => {
+  return tenantTransaction(async (tx) => {
     const [src, tgt] = await Promise.all([
       tx.tag.findUnique({ where: { id: opts.sourceTagId } }),
       tx.tag.findUnique({ where: { id: opts.targetTagId } }),

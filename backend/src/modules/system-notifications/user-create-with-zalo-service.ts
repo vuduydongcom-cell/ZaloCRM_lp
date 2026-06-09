@@ -18,7 +18,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { normalizePhone } from '../../shared/utils/phone.js';
 import { zaloOps } from '../../shared/zalo-operations.js';
@@ -651,7 +651,7 @@ export async function createUserAndSendLogin(input: CreateUserInput): Promise<Cr
   const userId = randomUUID();
   let user: { id: string; fullName: string; email: string | null; phone: string | null; role: string };
   try {
-    const txResult = await prisma.$transaction(async (tx) => {
+    const txResult = await tenantTransaction(async (tx) => {
       const u = await tx.user.create({
         data: {
           id: userId,

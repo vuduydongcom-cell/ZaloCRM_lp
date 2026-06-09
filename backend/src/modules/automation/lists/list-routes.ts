@@ -13,7 +13,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../../shared/database/prisma-client.js';
 import { authMiddleware } from '../../auth/auth-middleware.js';
 import { logger } from '../../../shared/utils/logger.js';
 import { parseAndDedup, parseRawText, detectInternalDup } from './list-import-service.js';
@@ -252,7 +252,7 @@ export async function customerListRoutes(app: FastifyInstance): Promise<void> {
       const pendingLookup = valid;
 
       // Single transaction: create list + insert all entries
-      const list = await prisma.$transaction(async (tx) => {
+      const list = await tenantTransaction(async (tx) => {
         const created = await tx.customerList.create({
           data: {
             id: randomUUID(),

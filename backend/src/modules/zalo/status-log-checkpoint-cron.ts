@@ -21,6 +21,7 @@ import { prisma } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { writeTransition, type ZaloStatus } from './status-log-service.js';
 import { zaloPool } from './zalo-pool.js';
+import { withTenant, runSystemQuery } from '../../shared/tenant/tenant-context.js';
 
 // 5 phút — đủ tight để uptime drift trong window 5p, đủ rộng để không spam DB.
 const CRON_SCHEDULE = '*/5 * * * *';
@@ -69,10 +70,14 @@ export async function runCheckpoint(): Promise<{
   const poolStatuses = zaloPool.getAllStatuses();
   const poolIds = new Set(Object.keys(poolStatuses));
 
-  // Find all accounts to reconcile: pool nicks + DB nicks có open record
-  const dbAccounts = await prisma.zaloAccount.findMany({
-    select: { id: true, orgId: true, status: true },
-  });
+  // Find all accounts to reconcile: pool nicks + DB nicks có open record.
+  // Cross-org scan (toàn bộ account mọi org) → runSystemQuery; per-account
+  // reconcile chạy trong tenant context của org đó.
+  const dbAccounts = await runSystemQuery(() =>
+    prisma.zaloAccount.findMany({
+      select: { id: true, orgId: true, status: true },
+    }),
+  );
 
   let reconciled = 0;
   let created = 0;
@@ -85,34 +90,39 @@ export async function runCheckpoint(): Promise<{
     const liveStatus = mapToLogStatus(liveStatusRaw);
     if (!liveStatus) continue; // 'connecting' hoặc unknown → skip
 
-    const open = await prisma.zaloAccountStatusLog.findFirst({
-      where: { accountId: acct.id, endedAt: null },
-      select: { status: true },
+    const outcome = await withTenant(acct.orgId, async () => {
+      const open = await prisma.zaloAccountStatusLog.findFirst({
+        where: { accountId: acct.id, endedAt: null },
+        select: { status: true },
+      });
+
+      if (!open) {
+        // Không có open record → tạo mới (crash recovery hoặc backfill miss)
+        await writeTransition({
+          accountId: acct.id,
+          orgId: acct.orgId,
+          status: liveStatus,
+          reason: 'crash_recovery',
+        });
+        return 'created' as const;
+      }
+
+      if (open.status !== liveStatus) {
+        // Drift: pool nói X, DB log nói Y → đồng bộ về pool
+        await writeTransition({
+          accountId: acct.id,
+          orgId: acct.orgId,
+          status: liveStatus,
+          reason: 'checkpoint',
+        });
+        return 'reconciled' as const;
+      }
+      // else: open.status === liveStatus → no-op (đồng bộ)
+      return 'noop' as const;
     });
 
-    if (!open) {
-      // Không có open record → tạo mới (crash recovery hoặc backfill miss)
-      await writeTransition({
-        accountId: acct.id,
-        orgId: acct.orgId,
-        status: liveStatus,
-        reason: 'crash_recovery',
-      });
-      created++;
-      continue;
-    }
-
-    if (open.status !== liveStatus) {
-      // Drift: pool nói X, DB log nói Y → đồng bộ về pool
-      await writeTransition({
-        accountId: acct.id,
-        orgId: acct.orgId,
-        status: liveStatus,
-        reason: 'checkpoint',
-      });
-      reconciled++;
-    }
-    // else: open.status === liveStatus → no-op (đồng bộ)
+    if (outcome === 'created') created++;
+    else if (outcome === 'reconciled') reconciled++;
   }
 
   if (reconciled > 0 || created > 0) {

@@ -9,6 +9,7 @@
 
 import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
+import { withTenant, runSystemQuery } from '../../../shared/tenant/tenant-context.js';
 
 const POLL_INTERVAL_MS = 60_000; // 1 minute
 let handle: NodeJS.Timeout | null = null;
@@ -32,19 +33,23 @@ export function stopBroadcastScheduler(): void {
 
 async function tick(): Promise<void> {
   try {
-    const due = await prisma.automationBroadcast.findMany({
-      where: {
-        state: 'scheduled',
-        scheduledAt: { lte: new Date() },
-      },
-      select: { id: true, orgId: true, name: true },
-      take: 20, // batch limit per tick
-    });
+    // Phase 1a 2026-06-08 — quét broadcast due cross-org ở chế độ system; mỗi
+    // broadcast fire trong withTenant(bc.orgId) bên dưới.
+    const due = await runSystemQuery(() =>
+      prisma.automationBroadcast.findMany({
+        where: {
+          state: 'scheduled',
+          scheduledAt: { lte: new Date() },
+        },
+        select: { id: true, orgId: true, name: true },
+        take: 20, // batch limit per tick
+      }),
+    );
     if (due.length === 0) return;
 
     logger.info(`[broadcast-scheduler] firing ${due.length} due broadcasts`);
     for (const bc of due) {
-      await fireBroadcast(bc.id, bc.orgId).catch((err) => {
+      await withTenant(bc.orgId, () => fireBroadcast(bc.id, bc.orgId)).catch((err) => {
         logger.error(`[broadcast-scheduler] fire ${bc.id} (${bc.name}) error:`, err);
       });
     }

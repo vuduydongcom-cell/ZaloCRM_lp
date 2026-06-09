@@ -22,6 +22,7 @@ import { Worker, type Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
+import { withTenant } from '../../../shared/tenant/tenant-context.js';
 import { zaloOps } from '../../../shared/zalo-operations.js';
 import { applyContactAggregateFromMessage } from '../../contacts/contact-aggregate.js';
 import { getBullMQRedis } from './redis-connection.js';
@@ -796,7 +797,8 @@ export function startBroadcastFireWorker(): void {
   }
   workerInstance = new Worker<BroadcastFireJobData, BroadcastFireResult>(
     QUEUE_NAMES.BROADCAST_FIRE,
-    processBroadcastTick,
+    // Phase 1a 2026-06-08 — tenant context cho mọi query của job.
+    (job: Job<BroadcastFireJobData, BroadcastFireResult>) => withTenant(job.data.orgId, () => processBroadcastTick(job)),
     {
       connection: getBullMQRedis(),
       concurrency: 2,

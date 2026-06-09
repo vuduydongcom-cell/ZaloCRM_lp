@@ -13,7 +13,7 @@
 // Crash recovery: nếu worker crash giữa Phase 2 và Phase 3 → entry stuck status=processing
 // → stuck sweeper after 5 phút release back to pool (documented duplicate-send risk).
 
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
 
 export interface ClaimedEntry {
@@ -124,7 +124,7 @@ export async function markEntrySent(input: {
   // Wave 2 regression that caused the welcome worker to send before the friend
   // request was accepted, and broke P2002 composite unique on retries.
   const kind = input.kind ?? 'FRIEND_REQUEST';
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     // Fix 2026-05-30 23:35 — re-test cùng KH trên trigger mới phải reset outbox cũ
     // (composite unique entry+kind chặn create row mới). Pattern: delete outbox của
     // trigger CŨ trước upsert nếu workflow của trigger mới. Idempotent: nếu cùng

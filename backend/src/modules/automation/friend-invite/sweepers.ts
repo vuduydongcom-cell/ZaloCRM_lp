@@ -12,11 +12,12 @@
 //    Pick FriendRequestOutbox WHERE sendStatus='success' AND sequenceMaterializedAt IS NULL
 //    Call materializeSequenceForContact() per row → UPDATE sequenceMaterializedAt.
 
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
 import { materializeSequenceForContact } from '../engine/campaign-materializer.js';
 import { getSequenceStepQueue } from '../queues/queue-registry.js';
 import { logEvent } from './event-log-service.js';
+import { withTenant, runSystemQuery } from '../../../shared/tenant/tenant-context.js';
 
 // #3 2026-06-06 (Anh chốt): các NGƯỠNG vận hành (kẹt mấy phút, cứu mấy lần, timeout
 // mấy giờ, reset nick offline mấy giờ) đọc từ "Cài đặt kỹ thuật" cấp org thay vì
@@ -30,14 +31,18 @@ interface TechThresholds {
 }
 async function getTechThresholds(): Promise<TechThresholds> {
   try {
-    const org = await prisma.organization.findFirst({
-      select: {
-        autoStuckThresholdMinutes: true,
-        autoStuckMaxRecovery: true,
-        autoCampaignTimeoutHours: true,
-        autoNickOfflineResetHours: true,
-      },
-    });
+    // Phase 1a 2026-06-08 — đọc cấu hình org đầu tiên (single-org deploy) ở
+    // chế độ system: query này không gắn org cụ thể, dùng làm tham số kỹ thuật.
+    const org = await runSystemQuery(() =>
+      prisma.organization.findFirst({
+        select: {
+          autoStuckThresholdMinutes: true,
+          autoStuckMaxRecovery: true,
+          autoCampaignTimeoutHours: true,
+          autoNickOfflineResetHours: true,
+        },
+      }),
+    );
     return {
       stuckMinutes: org?.autoStuckThresholdMinutes || 5,
       stuckMaxRecovery: org?.autoStuckMaxRecovery || 10,
@@ -69,7 +74,9 @@ async function runStuckSweeper(): Promise<void> {
     // lỗi worker/network chứ không phải nick chết tự nhiên.
     // #2 2026-06-06 — hàng đợi ở bảng nối trigger_queue_entries (q). EXISTS join
     // zalo_accounts đổi sang q.claimed_by_nick_id (cột giờ ở bảng nối).
-    const result = await prisma.$executeRaw`
+    // Phase 1a 2026-06-08 — bulk maintenance UPDATE quét toàn org (không gắn
+    // org cụ thể) → chạy ở chế độ system.
+    const result = await runSystemQuery(() => prisma.$executeRaw`
       UPDATE trigger_queue_entries q
       SET queue_status = 'queued_for_pickup',
           claimed_by_nick_id = NULL,
@@ -86,19 +93,19 @@ async function runStuckSweeper(): Promise<void> {
       WHERE q.queue_status = 'processing'
         AND q.locked_at < NOW() - make_interval(mins => ${stuckMinutes}::int)
         AND q.stuck_recovery_count < ${stuckMaxRecovery}::int
-    `;
+    `);
     if (result > 0) {
       logger.info(`[stuck-sweeper] released ${result} stuck entries back to pool`);
     }
 
     // Mark entries that hit max recoveries as failed_stuck
-    const failedStuck = await prisma.$executeRaw`
+    const failedStuck = await runSystemQuery(() => prisma.$executeRaw`
       UPDATE trigger_queue_entries q
       SET queue_status = 'failed_stuck', updated_at = NOW()
       WHERE q.queue_status = 'processing'
         AND q.locked_at < NOW() - make_interval(mins => ${stuckMinutes}::int)
         AND q.stuck_recovery_count >= ${stuckMaxRecovery}::int
-    `;
+    `);
     if (failedStuck > 0) {
       logger.warn(`[stuck-sweeper] ${failedStuck} entries marked failed_stuck after 10 recoveries`);
     }
@@ -126,7 +133,8 @@ async function runStuckSweeper(): Promise<void> {
  */
 async function runTriggerCompletionSweeper(): Promise<void> {
   try {
-    const result = await prisma.$executeRaw`
+    // Phase 1a 2026-06-08 — bulk maintenance UPDATE quét toàn org → system.
+    const result = await runSystemQuery(() => prisma.$executeRaw`
       UPDATE automation_triggers
       SET state = 'completed', updated_at = NOW()
       WHERE state = 'active'
@@ -159,7 +167,7 @@ async function runTriggerCompletionSweeper(): Promise<void> {
           WHERE c.trigger_id = automation_triggers.id
             AND c.state = 'active'
         )
-    `;
+    `);
     if (result > 0) {
       logger.info(`[trigger-sweeper] flipped ${result} triggers to state='completed' (pool empty + welcome enrolled + all sequence campaigns done)`);
     }
@@ -179,7 +187,8 @@ async function runTriggerCompletionSweeper(): Promise<void> {
 async function runExhaustedNicksSweeper(): Promise<void> {
   try {
     // #2 2026-06-06 — failedNickIds + queue ở bảng nối (q) theo từng trigger.
-    const result = await prisma.$executeRaw`
+    // Phase 1a 2026-06-08 — bulk maintenance UPDATE quét toàn org → system.
+    const result = await runSystemQuery(() => prisma.$executeRaw`
       UPDATE trigger_queue_entries q
       SET queue_status = 'failed_permanent', updated_at = NOW()
       FROM automation_triggers t
@@ -188,7 +197,7 @@ async function runExhaustedNicksSweeper(): Promise<void> {
         AND t.event_type = 'friend_invite_to_list'
         AND jsonb_array_length(q.failed_nick_ids) >= jsonb_array_length(t.segment_spec->'nickIds')
         AND jsonb_array_length(t.segment_spec->'nickIds') > 0
-    `;
+    `);
     if (result > 0) {
       logger.warn(`[exhausted-sweeper] ${result} entries marked failed_permanent (all trigger nicks failed)`);
     }
@@ -207,17 +216,21 @@ async function runOutboxDrainer(): Promise<void> {
     // Fix #1 (2026-06-02): thêm DUPLICATE_SKIP — khi KH đã nhận welcome từ trigger trước
     // (cùng nick+contact), welcome-probe skip nhưng VẪN phải enroll sequence bám đuổi mới.
     // Không enroll = trigger mới chạy nhưng sequence không bao giờ tới step 1.
-    const rows = await prisma.friendRequestOutbox.findMany({
-      where: {
-        kind: 'WELCOME_PROBE',
-        welcomeOutcome: { in: ['SENT_STRANGER', 'SENT_FRIEND', 'DUPLICATE_SKIP'] },
-        sequenceMaterializedAt: null,
-        successorSequenceId: { not: null },
-        attemptCount: { lt: 5 },
-      },
-      take: 50,
-      orderBy: { createdAt: 'asc' },
-    });
+    // Phase 1a 2026-06-08 — pull outbox cross-org ở chế độ system; mỗi row xử lý
+    // trong withTenant(trigger.orgId) sau khi tra được org.
+    const rows = await runSystemQuery(() =>
+      prisma.friendRequestOutbox.findMany({
+        where: {
+          kind: 'WELCOME_PROBE',
+          welcomeOutcome: { in: ['SENT_STRANGER', 'SENT_FRIEND', 'DUPLICATE_SKIP'] },
+          sequenceMaterializedAt: null,
+          successorSequenceId: { not: null },
+          attemptCount: { lt: 5 },
+        },
+        take: 50,
+        orderBy: { createdAt: 'asc' },
+      }),
+    );
 
     if (rows.length === 0) return;
 
@@ -225,96 +238,108 @@ async function runOutboxDrainer(): Promise<void> {
     for (const row of rows) {
       try {
         // Look up trigger to get orgId + ruleOverrides + 2 công tắc bám đuổi (#1).
-        const trigger = await prisma.automationTrigger.findUnique({
-          where: { id: row.triggerId },
-          select: {
-            orgId: true,
-            ruleOverrides: true,
-            followUpStrangerEnabled: true,
-            followUpFriendEnabled: true,
-          },
-        });
+        // Tra trigger ở chế độ system vì chưa biết org của row trước khi lookup.
+        const trigger = await runSystemQuery(() =>
+          prisma.automationTrigger.findUnique({
+            where: { id: row.triggerId },
+            select: {
+              orgId: true,
+              ruleOverrides: true,
+              followUpStrangerEnabled: true,
+              followUpFriendEnabled: true,
+            },
+          }),
+        );
         if (!trigger) {
           logger.warn(`[outbox-drainer] trigger ${row.triggerId} not found for outbox row ${row.id}`);
-          await prisma.friendRequestOutbox.update({
-            where: { id: row.id },
-            data: {
-              attemptCount: { increment: 1 },
-              lastErrorMessage: 'trigger missing',
-            },
-          });
-          continue;
-        }
-
-        // ── #1 2026-06-06 (Anh chốt): chặn enroll bám đuổi theo 2 công tắc ──
-        // Xác định KH hiện đã là bạn của nick chưa (quyết định công tắc nào áp dụng).
-        // SENT_STRANGER = welcome gửi qua hộp người lạ ⇒ lúc đó CHƯA là bạn.
-        // SENT_FRIEND = đã là bạn. DUPLICATE_SKIP = tra Friend thực tế để biết.
-        let isFriendNow = row.welcomeOutcome === 'SENT_FRIEND';
-        if (row.welcomeOutcome === 'DUPLICATE_SKIP') {
-          const fr = await prisma.friend.findFirst({
-            where: { zaloAccountId: row.nickId, contactId: row.contactId, friendshipStatus: 'accepted' },
-            select: { id: true },
-          });
-          isFriendNow = !!fr;
-        }
-        // CT1 (chưa là bạn) tắt → KHÔNG bám đuổi qua hộp người lạ.
-        // CT2 (đã là bạn) tắt → KHÔNG bám đuổi KH đã là bạn (chờ accept path lo nếu cần).
-        const allowed = isFriendNow ? trigger.followUpFriendEnabled : trigger.followUpStrangerEnabled;
-        if (!allowed) {
-          // Đánh dấu đã xử lý (materialized) để drainer không quét lại mãi; KHÔNG enqueue sequence.
-          await prisma.friendRequestOutbox.update({
-            where: { id: row.id },
-            data: {
-              sequenceMaterializedAt: new Date(),
-              lastErrorMessage: isFriendNow
-                ? 'followUpFriendEnabled=false — bỏ qua bám đuổi (KH đã là bạn)'
-                : 'followUpStrangerEnabled=false — bỏ qua bám đuổi (KH chưa kết bạn)',
-            },
-          });
-          logger.info(
-            `[outbox-drainer] skip enroll (công tắc tắt) trigger=${row.triggerId} contact=${row.contactId} isFriend=${isFriendNow}`,
+          await runSystemQuery(() =>
+            prisma.friendRequestOutbox.update({
+              where: { id: row.id },
+              data: {
+                attemptCount: { increment: 1 },
+                lastErrorMessage: 'trigger missing',
+              },
+            }),
           );
           continue;
         }
 
-        const result = await materializeSequenceForContact({
-          orgId: trigger.orgId,
-          contactId: row.contactId,
-          sequenceId: row.successorSequenceId!,
-          triggerId: row.triggerId,
-          assignedNickId: row.nickId,
-          originTaskId: row.customerListEntryId,
-          sequenceSnapshot: (row.sequenceVersionSnapshot ?? null) as never,
-          ruleOverrides: trigger.ruleOverrides as Record<string, unknown> | null,
-        });
+        // Toàn bộ xử lý org-scoped của row chạy trong tenant scope của trigger.orgId.
+        const outcome = await withTenant(trigger.orgId, async () => {
+          // ── #1 2026-06-06 (Anh chốt): chặn enroll bám đuổi theo 2 công tắc ──
+          // Xác định KH hiện đã là bạn của nick chưa (quyết định công tắc nào áp dụng).
+          // SENT_STRANGER = welcome gửi qua hộp người lạ ⇒ lúc đó CHƯA là bạn.
+          // SENT_FRIEND = đã là bạn. DUPLICATE_SKIP = tra Friend thực tế để biết.
+          let isFriendNow = row.welcomeOutcome === 'SENT_FRIEND';
+          if (row.welcomeOutcome === 'DUPLICATE_SKIP') {
+            const fr = await prisma.friend.findFirst({
+              where: { zaloAccountId: row.nickId, contactId: row.contactId, friendshipStatus: 'accepted' },
+              select: { id: true },
+            });
+            isFriendNow = !!fr;
+          }
+          // CT1 (chưa là bạn) tắt → KHÔNG bám đuổi qua hộp người lạ.
+          // CT2 (đã là bạn) tắt → KHÔNG bám đuổi KH đã là bạn (chờ accept path lo nếu cần).
+          const allowed = isFriendNow ? trigger.followUpFriendEnabled : trigger.followUpStrangerEnabled;
+          if (!allowed) {
+            // Đánh dấu đã xử lý (materialized) để drainer không quét lại mãi; KHÔNG enqueue sequence.
+            await prisma.friendRequestOutbox.update({
+              where: { id: row.id },
+              data: {
+                sequenceMaterializedAt: new Date(),
+                lastErrorMessage: isFriendNow
+                  ? 'followUpFriendEnabled=false — bỏ qua bám đuổi (KH đã là bạn)'
+                  : 'followUpStrangerEnabled=false — bỏ qua bám đuổi (KH chưa kết bạn)',
+              },
+            });
+            logger.info(
+              `[outbox-drainer] skip enroll (công tắc tắt) trigger=${row.triggerId} contact=${row.contactId} isFriend=${isFriendNow}`,
+            );
+            return 'skip' as const;
+          }
 
-        if (result.skipped) {
-          await prisma.friendRequestOutbox.update({
-            where: { id: row.id },
-            data: {
-              attemptCount: { increment: 1 },
-              lastErrorMessage: result.reason ?? 'skipped',
-            },
+          const result = await materializeSequenceForContact({
+            orgId: trigger.orgId,
+            contactId: row.contactId,
+            sequenceId: row.successorSequenceId!,
+            triggerId: row.triggerId,
+            assignedNickId: row.nickId,
+            originTaskId: row.customerListEntryId,
+            sequenceSnapshot: (row.sequenceVersionSnapshot ?? null) as never,
+            ruleOverrides: trigger.ruleOverrides as Record<string, unknown> | null,
           });
-        } else {
+
+          if (result.skipped) {
+            await prisma.friendRequestOutbox.update({
+              where: { id: row.id },
+              data: {
+                attemptCount: { increment: 1 },
+                lastErrorMessage: result.reason ?? 'skipped',
+              },
+            });
+            return 'skip' as const;
+          }
           await prisma.friendRequestOutbox.update({
             where: { id: row.id },
             data: {
               sequenceMaterializedAt: new Date(),
             },
           });
-          materialized++;
-        }
+          return 'materialized' as const;
+        });
+
+        if (outcome === 'materialized') materialized++;
       } catch (err: any) {
         logger.error(`[outbox-drainer] materialize failed for outbox row ${row.id}:`, err);
-        await prisma.friendRequestOutbox.update({
-          where: { id: row.id },
-          data: {
-            attemptCount: { increment: 1 },
-            lastErrorMessage: (err?.message ?? String(err)).slice(0, 500),
-          },
-        });
+        await runSystemQuery(() =>
+          prisma.friendRequestOutbox.update({
+            where: { id: row.id },
+            data: {
+              attemptCount: { increment: 1 },
+              lastErrorMessage: (err?.message ?? String(err)).slice(0, 500),
+            },
+          }),
+        );
       }
     }
 
@@ -322,13 +347,15 @@ async function runOutboxDrainer(): Promise<void> {
       logger.info(`[outbox-drainer] materialized ${materialized}/${rows.length} sequence campaigns`);
     }
 
-    // Alert on rows with attemptCount >= 5
-    const stuck = await prisma.friendRequestOutbox.count({
-      where: {
-        sequenceMaterializedAt: null,
-        attemptCount: { gte: 5 },
-      },
-    });
+    // Alert on rows with attemptCount >= 5 — đếm cross-org (monitoring) → system.
+    const stuck = await runSystemQuery(() =>
+      prisma.friendRequestOutbox.count({
+        where: {
+          sequenceMaterializedAt: null,
+          attemptCount: { gte: 5 },
+        },
+      }),
+    );
     if (stuck > 0) {
       logger.warn(`[outbox-drainer] ALERT: ${stuck} outbox rows stuck (>=5 attempts) — manual review needed`);
     }
@@ -349,16 +376,19 @@ async function runWelcomeFailedCleanup(): Promise<void> {
     // HARD_FAIL còn lại đúng nghĩa "KH thực sự lỗi cứng / friend record gone"
     // → vẫn retire để khỏi đa-poll vô hạn (Anh chốt câu 3 GIỮ NGUYÊN sau khi
     // em giải thích, không bỏ retire HARD_FAIL như em đề xuất sai ban đầu).
-    const { count } = await prisma.friendRequestOutbox.updateMany({
-      where: {
-        kind: 'WELCOME_PROBE',
-        welcomeOutcome: { in: ['BLOCKED_STRANGER', 'HARD_FAIL'] },
-        sequenceMaterializedAt: null,
-      },
-      data: {
-        sequenceMaterializedAt: new Date(),
-      },
-    });
+    // Phase 1a 2026-06-08 — bulk cleanup quét toàn org → system.
+    const { count } = await runSystemQuery(() =>
+      prisma.friendRequestOutbox.updateMany({
+        where: {
+          kind: 'WELCOME_PROBE',
+          welcomeOutcome: { in: ['BLOCKED_STRANGER', 'HARD_FAIL'] },
+          sequenceMaterializedAt: null,
+        },
+        data: {
+          sequenceMaterializedAt: new Date(),
+        },
+      }),
+    );
     if (count > 0) {
       logger.info(`[welcome-failed-cleanup] retired ${count} BLOCKED_STRANGER/HARD_FAIL rows from poll set`);
     }
@@ -411,26 +441,26 @@ async function runCampaignTimeoutSweeper(): Promise<void> {
     // sẽ reset KH về queue ở mốc ngưỡng trước khi sweeper này kích campaign timeout.
     // Sweeper campaign-timeout còn giữ làm safety net cho campaign orphan.
     const { campaignTimeoutHours } = await getTechThresholds();
-    // FIX C 2026-06-08 — BỎ điều kiện `triggerId NOT NULL`. Campaign mồ côi (trigger đã
-    // xoá → onDelete:SetNull set triggerId=null) trước đây KHÔNG bao giờ lọt vào đây →
-    // kẹt state='active' vĩnh viễn (quét thực tế 2026-06-08 thấy 3 row treo ~6 ngày).
-    // Trigger đã xoá thì không còn nguồn tạo job mới + jobId gắn triggerId cũ không khớp
-    // gì nữa → an toàn flip 'timeout'. Nhánh mồ côi xử lý riêng trong vòng lặp (không
-    // scan BullMQ vì không có triggerId để dựng prefix).
-    const stale = await prisma.automationCampaign.findMany({
-      where: {
-        state: { in: ['active', 'on_hold'] },
-        updatedAt: { lt: new Date(Date.now() - campaignTimeoutHours * 60 * 60_000) },
-      },
-      select: {
-        id: true,
-        orgId: true,
-        triggerId: true,
-        sequenceId: true,
-        updatedAt: true,
-      },
-      take: 200,
-    });
+    // FIX C 2026-06-08 — BỎ điều kiện `triggerId NOT NULL`. Campaign mồ côi (trigger đã xoá
+    // → onDelete:SetNull set triggerId=null) trước đây kẹt state='active' vĩnh viễn → an toàn
+    // flip 'timeout'. Nhánh mồ côi xử lý riêng trong vòng lặp (không scan BullMQ).
+    // Phase 1a: quét cross-org ở chế độ system; flip + event-log từng campaign trong withTenant.
+    const stale = await runSystemQuery(() =>
+      prisma.automationCampaign.findMany({
+        where: {
+          state: { in: ['active', 'on_hold'] },
+          updatedAt: { lt: new Date(Date.now() - campaignTimeoutHours * 60 * 60_000) },
+        },
+        select: {
+          id: true,
+          orgId: true,
+          triggerId: true,
+          sequenceId: true,
+          updatedAt: true,
+        },
+        take: 200,
+      }),
+    );
 
     if (stale.length === 0) return;
 
@@ -467,10 +497,12 @@ async function runCampaignTimeoutSweeper(): Promise<void> {
 
       // Step 3: atomic flip — đảm bảo vẫn 'active' hoặc 'on_hold' (tránh race với tryCompleteCampaign).
       // Sprint v3 (2026-06-03): on_hold cũng eligible — campaign sticky hold quá 24h thì timeout.
-      const updated = await prisma.automationCampaign.updateMany({
-        where: { id: c.id, state: { in: ['active', 'on_hold'] } },
-        data: { state: 'timeout', completedAt: new Date() },
-      });
+      const updated = await withTenant(c.orgId, () =>
+        prisma.automationCampaign.updateMany({
+          where: { id: c.id, state: { in: ['active', 'on_hold'] } },
+          data: { state: 'timeout', completedAt: new Date() },
+        }),
+      );
       if (updated.count === 0) continue; // race lost, ai đó đã flip rồi
 
       flipped++;
@@ -484,10 +516,11 @@ async function runCampaignTimeoutSweeper(): Promise<void> {
 
       // Step 4: alert event log (fire-and-forget). Chỉ log khi có triggerId hợp lệ —
       // campaign mồ côi (FIX C) không có Mục tiêu để gắn event nên bỏ qua, chỉ flip state.
+      // Phase 1a: bọc withTenant(c.orgId).
       if (c.triggerId) {
-        void logEvent({
+        void withTenant(c.orgId, () => logEvent({
           orgId: c.orgId,
-          triggerId: c.triggerId,
+          triggerId: c.triggerId!,
           eventType: 'campaign_timeout',
           eventPriority: 'urgent',
           summary: `Campaign ${c.id} bị timeout sau ${staleHours}h không advance (worker crash hoặc Redis mất việc).`,
@@ -497,7 +530,7 @@ async function runCampaignTimeoutSweeper(): Promise<void> {
             staleHours,
             flippedAt: new Date().toISOString(),
           },
-        });
+        }));
       }
     }
 
@@ -549,24 +582,28 @@ async function runStickyNickHoldSweeper(): Promise<void> {
     const { nickOfflineResetHours } = await getTechThresholds();
     const cutoff = new Date(Date.now() - nickOfflineResetHours * 60 * 60_000);
     // #2 2026-06-06 — quét bảng nối (per-trigger). rowIndex/phoneE164 lấy qua relation entry.
-    const staleRows = await prisma.triggerQueueEntry.findMany({
-      where: {
-        nickHoldSince: { not: null, lt: cutoff },
-        queueStatus: { in: ['processed', 'processing'] },
-      },
-      select: {
-        customerListEntryId: true,
-        customerListId: true,
-        triggerId: true,
-        contactId: true,
-        claimedByNickId: true,
-        nickHoldSince: true,
-        restartCycle: true,
-        failedNickIds: true,
-        entry: { select: { rowIndex: true, phoneE164: true } },
-      },
-      take: 50, // tránh long tx
-    });
+    // Phase 1a 2026-06-08 — quét cross-org ở chế độ system; reset từng entry trong
+    // withTenant(orgId) bên dưới (orgId tra theo trigger của entry).
+    const staleRows = await runSystemQuery(() =>
+      prisma.triggerQueueEntry.findMany({
+        where: {
+          nickHoldSince: { not: null, lt: cutoff },
+          queueStatus: { in: ['processed', 'processing'] },
+        },
+        select: {
+          customerListEntryId: true,
+          customerListId: true,
+          triggerId: true,
+          contactId: true,
+          claimedByNickId: true,
+          nickHoldSince: true,
+          restartCycle: true,
+          failedNickIds: true,
+          entry: { select: { rowIndex: true, phoneE164: true } },
+        },
+        take: 50, // tránh long tx
+      }),
+    );
 
     if (staleRows.length === 0) return;
 
@@ -596,7 +633,17 @@ async function runStickyNickHoldSweeper(): Promise<void> {
         : failedArr;
 
       try {
-        await prisma.$transaction(async (tx) => {
+        // Phase 1a 2026-06-08 — tra orgId của entry (system) để mở tenant scope
+        // cho transaction reset bên dưới.
+        const entryOrg = e.triggerId
+          ? await runSystemQuery(() =>
+              prisma.automationTrigger.findUnique({
+                where: { id: e.triggerId! },
+                select: { orgId: true },
+              }),
+            )
+          : null;
+        await withTenant(entryOrg?.orgId ?? '', () => tenantTransaction(async (tx) => {
           // Lookup org_id từ trigger (cần cho event log)
           const trigger = e.triggerId
             ? await tx.automationTrigger.findUnique({
@@ -683,7 +730,7 @@ async function runStickyNickHoldSweeper(): Promise<void> {
               },
             });
           }
-        });
+        }));
         resetCount++;
         logger.warn(
           `[sticky-hold-sweeper] reset entry=${e.id} oldNick=${oldNickId} restartCycle=${(e.restartCycle ?? 0) + 1} (nick offline >24h)`,
@@ -720,20 +767,25 @@ let remindSweeperInterval: NodeJS.Timeout | null = null;
 async function runRemindSweeper(): Promise<void> {
   try {
     // Các trigger friend_invite đang active, bật nhắc, có template.
-    const triggers = await prisma.automationTrigger.findMany({
-      where: {
-        eventType: 'friend_invite_to_list',
-        state: 'active',
-        enableRemind: true,
-        remindTemplate: { not: null },
-      },
-      select: { id: true, orgId: true, remindTemplate: true, remindDelayDays: true },
-      take: 50,
-    });
+    // Phase 1a 2026-06-08 — trigger list cross-org ở chế độ system; xử lý từng
+    // trigger trong withTenant(t.orgId) bên dưới.
+    const triggers = await runSystemQuery(() =>
+      prisma.automationTrigger.findMany({
+        where: {
+          eventType: 'friend_invite_to_list',
+          state: 'active',
+          enableRemind: true,
+          remindTemplate: { not: null },
+        },
+        select: { id: true, orgId: true, remindTemplate: true, remindDelayDays: true },
+        take: 50,
+      }),
+    );
     if (triggers.length === 0) return;
 
     let sent = 0;
     for (const t of triggers) {
+      await withTenant(t.orgId, async () => {
       const cutoff = new Date(Date.now() - (t.remindDelayDays || 3) * 24 * 3600_000);
       // Outbox FRIEND_REQUEST đã gửi quá hạn, lấy nick + contact + uid.
       const candidates = await prisma.friendRequestOutbox.findMany({
@@ -794,6 +846,7 @@ async function runRemindSweeper(): Promise<void> {
           logger.warn(`[remind-sweeper] send failed contact=${c.contactId}: ${(err as Error).message}`);
         }
       }
+      });
     }
     if (sent > 0) logger.info(`[remind-sweeper] sent ${sent} Tin 3 nhắc đồng ý KB`);
   } catch (err) {

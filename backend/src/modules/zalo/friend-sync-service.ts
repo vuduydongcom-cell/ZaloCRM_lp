@@ -27,6 +27,7 @@ import { randomUUID } from 'node:crypto';
 import { prisma } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { zaloOps } from '../../shared/zalo-operations.js';
+import { withTenant } from '../../shared/tenant/tenant-context.js';
 import { logActivity } from '../activity/activity-logger.js';
 import { applyFriendTransition } from './friend-event-handler.js';
 import { resolveOrCreateContact } from '../contacts/resolve-contact.js';
@@ -121,6 +122,16 @@ function extractFriendInfo(raw: Record<string, unknown>): {
  *  - Cooldown manual: trả {skipped:'cooldown'} nhanh (cron/connect bypass)
  */
 export async function syncFriendsForAccount(
+  accountId: string,
+  orgId: string,
+  opts: SyncFriendsOptions,
+): Promise<SyncFriendsResult> {
+  // Bọc toàn bộ org-scoped work trong tenant context (cron/connect chạy ngoài
+  // request HTTP; manual route đã có context — re-establish cùng org vô hại).
+  return withTenant(orgId, () => syncFriendsForAccountImpl(accountId, orgId, opts));
+}
+
+async function syncFriendsForAccountImpl(
   accountId: string,
   orgId: string,
   opts: SyncFriendsOptions,
@@ -410,6 +421,15 @@ export interface SyncAccountFullyResult {
  * (Cron loop ngoài vẫn sequential giữa accounts để tránh burst Zalo rate-limit.)
  */
 export async function syncAccountFully(
+  accountId: string,
+  orgId: string,
+  opts: SyncFriendsOptions,
+): Promise<SyncAccountFullyResult> {
+  // Bọc toàn bộ (friends + labels + B8 $executeRaw backfill) trong tenant context.
+  return withTenant(orgId, () => syncAccountFullyImpl(accountId, orgId, opts));
+}
+
+async function syncAccountFullyImpl(
   accountId: string,
   orgId: string,
   opts: SyncFriendsOptions,

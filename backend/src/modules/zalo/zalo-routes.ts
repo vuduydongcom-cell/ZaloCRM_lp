@@ -5,7 +5,7 @@
 import type { FastifyInstance } from 'fastify';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { zaloPool } from './zalo-pool.js';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { getZaloScope, canManageAccount, requireAccountManagement, requireAccountVisible } from './zalo-scope.js';
 
 export async function zaloRoutes(app: FastifyInstance): Promise<void> {
@@ -63,7 +63,7 @@ export async function zaloRoutes(app: FastifyInstance): Promise<void> {
       // FIX 2026-05-22 Bug A: tạo nick + auto-insert ZaloAccountAccess cho owner.
       // Trước: owner KHÔNG hiện trong crew list (frontend đọc crew từ access table).
       // Giờ: atomic create cả 2 trong tx, owner mặc định permission='admin'.
-      const account = await prisma.$transaction(async (tx) => {
+      const account = await tenantTransaction(async (tx) => {
         const acc = await tx.zaloAccount.create({
           data: {
             orgId: user.orgId,

@@ -13,7 +13,7 @@
  *   - 'external_sync'  : future (Getfly sync)
  */
 import { randomUUID } from 'node:crypto';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { logActivity } from '../activity/activity-logger.js';
 
@@ -898,7 +898,7 @@ export async function requestLead(args: { orgId: string; userId: string }) {
   const expiresAt = new Date(Date.now() + config.autoReturnAfterMinutes * 60 * 1000);
 
   // Full transaction: advisory lock user → re-validate → query candidates → lock contact → create LeadRequest
-  const result = await prisma.$transaction(async (tx) => {
+  const result = await tenantTransaction(async (tx) => {
     // 1. Advisory lock per user — chỉ 1 requestLead/user tại 1 thời điểm
     const lockKey = userLockKey(args.userId);
     await tx.$executeRawUnsafe(`SELECT pg_advisory_xact_lock(123::int, ${lockKey}::int)`);
@@ -1246,7 +1246,7 @@ export async function submitNote(args: { userId: string; leadRequestId: string; 
   // Codex MEDIUM-3 fix: conditional update để chống double-submit race.
   // updateMany với where note_submitted_at IS NULL — chỉ row đầu tiên success;
   // count=0 = race lose, abort tạo Note để tránh duplicate.
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     const updated = await tx.leadRequest.updateMany({
       where: { id: lr.id, noteSubmittedAt: null, releaseReason: null },
       data: { noteContent: trimmed, noteSubmittedAt: now },
@@ -1295,7 +1295,7 @@ export async function returnLead(args: { userId: string; leadRequestId: string; 
       `Lý do trả lại pool phải tối thiểu ${MIN_REASON_LEN} ký tự (hiện ${reasonText.length}). Vd: "KH không phải BĐS, sai SĐT", "Đã có sale khác chăm".`);
   }
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     // Conditional update — chỉ rollback nếu sale vẫn là current owner
     await tx.contact.updateMany({
       where: { id: lr.contactId, assignedUserId: args.userId },
@@ -1382,7 +1382,7 @@ export async function autoReturnExpiredLeads() {
   // requestedByUserId. Nếu sale đã được reassign manually (admin/sale khác) trong 7
   // ngày chờ → không ghi đè.
   for (const lr of expired) {
-    await prisma.$transaction(async (tx) => {
+    await tenantTransaction(async (tx) => {
       await tx.contact.updateMany({
         where: { id: lr.contactId, assignedUserId: lr.requestedByUserId },
         data: { assignedUserId: lr.previousAssigneeId },

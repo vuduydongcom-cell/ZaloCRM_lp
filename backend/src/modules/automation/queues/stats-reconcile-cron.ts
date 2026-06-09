@@ -16,6 +16,7 @@
 
 import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
+import { withTenant, runSystemQuery } from '../../../shared/tenant/tenant-context.js';
 
 // Convert UTC to VN time check
 function shouldRunNow(now = new Date()): boolean {
@@ -31,15 +32,21 @@ export async function reconcileSequenceCounters(): Promise<{
 }> {
   logger.info('[stats-reconcile] starting daily reconcile...');
 
-  const sequences = await prisma.automationSequence.findMany({
-    where: { enabled: true },
-    select: { id: true, name: true, orgId: true },
-  });
+  // Phase 1a 2026-06-08 — danh sách sequence trải nhiều org → query cross-org
+  // chạy ở chế độ system (bypass tenant-guard). Phần reconcile từng sequence
+  // bọc trong withTenant(seq.orgId) bên dưới.
+  const sequences = await runSystemQuery(() =>
+    prisma.automationSequence.findMany({
+      where: { enabled: true },
+      select: { id: true, name: true, orgId: true },
+    }),
+  );
 
   let updated = 0;
   let totalDrift = 0;
 
   for (const seq of sequences) {
+    const seqResult = await withTenant(seq.orgId, async () => {
     // Find triggers linked to this sequence
     const triggers = await prisma.automationTrigger.findMany({
       where: {
@@ -50,7 +57,7 @@ export async function reconcileSequenceCounters(): Promise<{
     });
     const triggerIds = triggers.map((t) => t.id);
 
-    if (triggerIds.length === 0) continue;
+    if (triggerIds.length === 0) return null;
 
     // Aggregate raw counts từ event log
     const [enrolledLifetime, completedLifetime, replies, blocks] = await Promise.all([
@@ -99,7 +106,7 @@ export async function reconcileSequenceCounters(): Promise<{
         blockCountCached: true,
       },
     });
-    if (!current) continue;
+    if (!current) return null;
 
     const drift =
       Math.abs(current.enrolledCountCached - enrolledCount) +
@@ -122,8 +129,14 @@ export async function reconcileSequenceCounters(): Promise<{
         `[stats-reconcile] sequence ${seq.name} (${seq.id}) drift=${drift} reconciled ` +
           `enrolled=${enrolledCount} completed=${completedCount} reply=${replyCount} block=${blockCount}`,
       );
+      return { drift };
+    }
+    return null;
+    });
+
+    if (seqResult) {
       updated++;
-      totalDrift += drift;
+      totalDrift += seqResult.drift;
     }
   }
 

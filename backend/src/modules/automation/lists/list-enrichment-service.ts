@@ -23,6 +23,7 @@ import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
 import { recomputeListCounters } from './list-entry-routes.js';
 import { appendSystemMessage } from './list-system-messages.js';
+import { withTenant, runSystemQuery } from '../../../shared/tenant/tenant-context.js';
 
 const CHUNK_SIZE = 200;
 const TICK_INTERVAL_MS = 30 * 1000; // 30 seconds
@@ -51,13 +52,18 @@ async function enrichListOnce(listId: string): Promise<{ processed: number; enri
   let processed = 0;
   let enriched = 0;
 
-  // Tìm list orgId
-  const list = await prisma.customerList.findUnique({
-    where: { id: listId },
-    select: { orgId: true },
-  });
+  // Tìm list orgId — Phase 1a 2026-06-08 — lookup ở chế độ system vì chưa biết
+  // org của list trước khi tra; toàn bộ enrichment org-scoped chạy trong
+  // withTenant(list.orgId) bên dưới.
+  const list = await runSystemQuery(() =>
+    prisma.customerList.findUnique({
+      where: { id: listId },
+      select: { orgId: true },
+    }),
+  );
   if (!list) return { processed: 0, enriched: 0 };
 
+  return withTenant(list.orgId, async () => {
   // Process in chunks until no more pending
   while (true) {
     // 2026-05-20 v2 (advisory dup model): worker enrich tất cả entries valid +
@@ -213,6 +219,7 @@ async function enrichListOnce(listId: string): Promise<{ processed: number; enri
     '[list-enrichment] list done',
   );
   return { processed, enriched };
+  });
 }
 
 /**
@@ -223,12 +230,16 @@ async function backgroundTick(): Promise<void> {
   if (inFlight) return;
   inFlight = true;
   try {
-    const stale = await prisma.customerList.findMany({
-      where: { status: 'processing', pendingLookupEntries: { gt: 0 } },
-      select: { id: true },
-      take: 5, // process up to 5 lists in parallel per tick
-      orderBy: { startedAt: 'asc' }, // FIFO
-    });
+    // Phase 1a 2026-06-08 — quét list cross-org ở chế độ system; mỗi enrichListOnce
+    // tự mở tenant scope theo orgId của list.
+    const stale = await runSystemQuery(() =>
+      prisma.customerList.findMany({
+        where: { status: 'processing', pendingLookupEntries: { gt: 0 } },
+        select: { id: true },
+        take: 5, // process up to 5 lists in parallel per tick
+        orderBy: { startedAt: 'asc' }, // FIFO
+      }),
+    );
 
     if (stale.length === 0) return;
 

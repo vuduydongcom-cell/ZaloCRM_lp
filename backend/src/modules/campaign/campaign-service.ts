@@ -8,7 +8,7 @@
  *     Discovery is a side-effect of the attempt, not a separate scan.
  *   - executeRandomFriendRequest(): the composed flow exposed via the route.
  */
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { zaloOps, ZaloOpError } from '../../shared/zalo-operations.js';
 import { logger } from '../../shared/utils/logger.js';
 import { markFriendRequestSent } from '../zalo/friend-event-handler.js';
@@ -145,16 +145,16 @@ export async function attemptFriendRequest(args: {
 
   if (!zaloUid) {
     // Verified: phone has no Zalo account
-    await prisma.$transaction([
-      prisma.contact.update({
+    await tenantTransaction(async (tx) => {
+      await tx.contact.update({
         where: { id: contactId },
         data: {
           hasZalo: false,
           zaloLookupAt: new Date(),
           zaloLookupAttempts: { increment: 1 },
         },
-      }),
-      prisma.friendshipAttempt.update({
+      });
+      await tx.friendshipAttempt.update({
         where: { id: attempt.id },
         data: {
           state: 'no_zalo',
@@ -162,8 +162,8 @@ export async function attemptFriendRequest(args: {
           lookedUpAt: new Date(),
           decidedAt: new Date(),
         },
-      }),
-    ]);
+      });
+    });
     return {
       attemptId: attempt.id,
       ok: false,

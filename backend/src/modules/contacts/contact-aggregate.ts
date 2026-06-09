@@ -11,7 +11,7 @@
  *    once per actually-created Message row (i.e. after a successful create
  *    that did not hit the dedup path).
  */
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { randomUUID } from 'node:crypto';
 import { counterDelta, deriveRelationshipKind } from '../zalo/friend-event-handler.js';
@@ -249,7 +249,7 @@ export async function applyFriendAggregate(args: AggregateMessageInput): Promise
       patch: Record<string, unknown>;
     }> = [];
 
-    await prisma.$transaction(async (tx) => {
+    await tenantTransaction(async (tx) => {
       // Friend identity = (zaloAccountId, zaloUidInNick) — externalThreadId của conversation
       // chính là zaloUidInNick (UID per-account của khách qua nick này).
       const existing = await tx.friend.findUnique({

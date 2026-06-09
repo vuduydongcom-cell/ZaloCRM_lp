@@ -12,6 +12,7 @@
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
+import { withTenant, runSystemQuery } from '../../../shared/tenant/tenant-context.js';
 import {
   TASK_STATES,
   MAX_ATTEMPT_COUNT,
@@ -79,41 +80,50 @@ export async function tick(): Promise<void> {
     // are assumed crashed (container died mid-execution) — reset to queued
     // for retry. Uses updatedAt as the lease proxy (auto-updated by Prisma on
     // state transition). No schema change needed.
+    // Phase 1a 2026-06-08 — các query quét toàn org (lease reclaim, pick batch,
+    // cleanup stale) chạy cross-org ở chế độ system; xử lý từng task bọc trong
+    // withTenant(task.orgId) bên dưới.
     const leaseExpiry = new Date(now.getTime() - 5 * 60 * 1000);
-    const reclaimed = await ((prisma as any).automationTask ?? _automationTaskStub).updateMany({
-      where: {
-        state: TASK_STATES.RUNNING,
-        updatedAt: { lt: leaseExpiry },
-      },
-      data: { state: TASK_STATES.QUEUED },
-    });
+    const reclaimed = await runSystemQuery<any>(() =>
+      ((prisma as any).automationTask ?? _automationTaskStub).updateMany({
+        where: {
+          state: TASK_STATES.RUNNING,
+          updatedAt: { lt: leaseExpiry },
+        },
+        data: { state: TASK_STATES.QUEUED },
+      }),
+    );
     if (reclaimed.count > 0) {
       logger.warn(`[task-worker] reclaimed ${reclaimed.count} stuck-running tasks (lease expired)`);
     }
-    const tasks = await ((prisma as any).automationTask ?? _automationTaskStub).findMany({
-      where: {
-        state: TASK_STATES.QUEUED,
-        scheduledAt: { lte: now, gte: staleCutoff },
-      },
-      orderBy: [{ scheduledAt: 'asc' }],
-      take: BATCH_SIZE,
-    });
+    const tasks = await runSystemQuery<any>(() =>
+      ((prisma as any).automationTask ?? _automationTaskStub).findMany({
+        where: {
+          state: TASK_STATES.QUEUED,
+          scheduledAt: { lte: now, gte: staleCutoff },
+        },
+        orderBy: [{ scheduledAt: 'asc' }],
+        take: BATCH_SIZE,
+      }),
+    );
     if (tasks.length === 0) {
       // Cleanup stale tasks (any queued task scheduled > 24h ago is stale).
       // Single-shot per tick — doesn't run if there's actual work to do.
-      await ((prisma as any).automationTask ?? _automationTaskStub).updateMany({
-        where: {
-          state: TASK_STATES.QUEUED,
-          scheduledAt: { lt: staleCutoff },
-        },
-        data: { state: TASK_STATES.SKIPPED, skipReason: 'stale_scheduled_at' },
-      });
+      await runSystemQuery(() =>
+        ((prisma as any).automationTask ?? _automationTaskStub).updateMany({
+          where: {
+            state: TASK_STATES.QUEUED,
+            scheduledAt: { lt: staleCutoff },
+          },
+          data: { state: TASK_STATES.SKIPPED, skipReason: 'stale_scheduled_at' },
+        }),
+      );
       return;
     }
 
     logger.debug('[task-worker] processing ' + tasks.length + ' tasks');
     for (const task of tasks) {
-      await processTask(task.id);
+      await withTenant(task.orgId, () => processTask(task.id));
     }
   } catch (err) {
     logger.error('[task-worker] tick error:', err);

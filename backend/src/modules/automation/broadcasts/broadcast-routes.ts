@@ -29,7 +29,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../../shared/database/prisma-client.js';
 import { authMiddleware } from '../../auth/auth-middleware.js';
 import { requireGrant } from '../../rbac/rbac-middleware.js';
 import { logger } from '../../../shared/utils/logger.js';
@@ -382,13 +382,13 @@ export async function broadcastRoutes(app: FastifyInstance): Promise<void> {
     const bc = await prisma.automationBroadcast.findFirst({ where: { id, orgId: user.orgId }, select: { state: true } });
     if (!bc) return reply.status(404).send({ error: 'broadcast not found' });
     if (bc.state !== 'running') return reply.status(409).send({ error: `not running` });
-    await prisma.$transaction([
-      prisma.automationBroadcast.update({ where: { id }, data: { state: 'paused' } }),
-      prisma.automationCampaign.updateMany({
+    await tenantTransaction(async (tx) => {
+      await tx.automationBroadcast.update({ where: { id }, data: { state: 'paused' } });
+      await tx.automationCampaign.updateMany({
         where: { broadcastId: id, state: 'active' },
         data: { state: 'paused' },
-      }),
-    ]);
+      });
+    });
     // Worker tự stop khi check state mid-tick (KHÔNG cần xoá job — worker tự thấy state changed)
     return { ok: true };
   });
@@ -403,13 +403,13 @@ export async function broadcastRoutes(app: FastifyInstance): Promise<void> {
     });
     if (!bc) return reply.status(404).send({ error: 'broadcast not found' });
     if (bc.state !== 'paused') return reply.status(409).send({ error: `not paused` });
-    await prisma.$transaction([
-      prisma.automationBroadcast.update({ where: { id }, data: { state: 'running' } }),
-      prisma.automationCampaign.updateMany({
+    await tenantTransaction(async (tx) => {
+      await tx.automationBroadcast.update({ where: { id }, data: { state: 'running' } });
+      await tx.automationCampaign.updateMany({
         where: { broadcastId: id, state: 'paused' },
         data: { state: 'active' },
-      }),
-    ]);
+      });
+    });
     // Re-enqueue tick worker — pickup từ resumeCursor đã lưu
     const resumeTickIdx = Date.now() % 1_000_000; // unique tick idx tránh dedup BullMQ
     await getBroadcastFireQueue().add(
@@ -426,16 +426,16 @@ export async function broadcastRoutes(app: FastifyInstance): Promise<void> {
     const { id } = request.params as { id: string };
     const bc = await prisma.automationBroadcast.findFirst({ where: { id, orgId: user.orgId }, select: { state: true } });
     if (!bc) return reply.status(404).send({ error: 'broadcast not found' });
-    await prisma.$transaction([
-      prisma.automationBroadcast.update({
+    await tenantTransaction(async (tx) => {
+      await tx.automationBroadcast.update({
         where: { id },
         data: { state: 'cancelled', completedAt: new Date() },
-      }),
-      prisma.automationCampaign.updateMany({
+      });
+      await tx.automationCampaign.updateMany({
         where: { broadcastId: id, state: { in: ['active', 'paused'] } },
         data: { state: 'cancelled', completedAt: new Date() },
-      }),
-    ]);
+      });
+    });
     // Worker tự stop khi check state mid-tick
     return { ok: true };
   });

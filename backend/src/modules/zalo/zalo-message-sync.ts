@@ -9,6 +9,7 @@ import { prisma } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { handleIncomingMessage } from '../chat/message-handler.js';
 import { detectContentType, extractAlbumInfo } from './zalo-message-helpers.js';
+import { withTenant, runSystemQuery } from '../../shared/tenant/tenant-context.js';
 
 const SYNC_INTERVAL_MS = 5 * 60_000; // 5 minutes
 const MAX_GROUPS_PER_SYNC = 20;
@@ -22,12 +23,20 @@ const syncIntervals = new Map<string, ReturnType<typeof setInterval>>();
  * Returns the number of newly inserted messages.
  */
 async function syncGroupMessages(api: any, accountId: string): Promise<number> {
-  const account = await prisma.zaloAccount.findUnique({
-    where: { id: accountId },
-    select: { orgId: true },
-  });
+  // Lookup org của account TRƯỚC khi có tenant context (account-by-id, cross-org discovery).
+  const account = await runSystemQuery(() =>
+    prisma.zaloAccount.findUnique({
+      where: { id: accountId },
+      select: { orgId: true },
+    }),
+  );
   if (!account) return 0;
 
+  // Toàn bộ phần sync org-scoped chạy trong tenant context của account.
+  return withTenant(account.orgId, () => syncGroupMessagesInOrg(api, accountId));
+}
+
+async function syncGroupMessagesInOrg(api: any, accountId: string): Promise<number> {
   // Get most recently active group conversations
   const groupConvs = await prisma.conversation.findMany({
     where: { zaloAccountId: accountId, threadType: 'group' },

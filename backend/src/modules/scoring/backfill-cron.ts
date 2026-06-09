@@ -17,6 +17,7 @@
  */
 
 import { prisma } from '../../shared/database/prisma-client.js';
+import { withTenant } from '../../shared/tenant/tenant-context.js';
 import { logger } from '../../shared/utils/logger.js';
 import { applySignalsToFriend } from './score-engine.js';
 import { detectSignalsFromMessage } from './signal-detector.js';
@@ -76,48 +77,52 @@ export async function runBackfillTick(): Promise<BackfillResult> {
 
     for (const f of candidates) {
       try {
-        // Replay từ message inbound gần đây (limit 50 msg/friend để tránh quá tải)
-        const conv = await prisma.conversation.findFirst({
-          where: { orgId: f.orgId, zaloAccountId: f.zaloAccountId, contactId: f.contactId },
-          select: { id: true },
-        });
-        if (!conv) {
-          // Mark friend đã scan để không pick lại
-          await prisma.friend.update({
-            where: { id: f.id },
-            data: { scoreUpdatedAt: new Date() },
+        const applied = await withTenant(f.orgId, async () => {
+          // Replay từ message inbound gần đây (limit 50 msg/friend để tránh quá tải)
+          const conv = await prisma.conversation.findFirst({
+            where: { orgId: f.orgId, zaloAccountId: f.zaloAccountId, contactId: f.contactId },
+            select: { id: true },
           });
-          processed++;
-          continue;
-        }
-
-        const messages = await prisma.message.findMany({
-          where: { conversationId: conv.id, senderType: 'contact' },
-          select: { content: true, sentAt: true },
-          orderBy: { sentAt: 'desc' },
-          take: 50,
-        });
-
-        for (const m of messages) {
-          if (!m.content) continue;
-          const signals = await detectSignalsFromMessage(f.orgId, m.content, f.statusRef?.name ?? null);
-          if (signals.length > 0) {
-            await applySignalsToFriend(f.id, f.orgId, signals, 'backfill');
-            signalsApplied += signals.length;
+          if (!conv) {
+            // Mark friend đã scan để không pick lại
+            await prisma.friend.update({
+              where: { id: f.id },
+              data: { scoreUpdatedAt: new Date() },
+            });
+            return 0;
           }
-        }
 
-        // Stamp scoreUpdatedAt nếu chưa có signals nào apply (tránh re-pick)
-        const updated = await prisma.friend.findUnique({
-          where: { id: f.id },
-          select: { scoreUpdatedAt: true },
-        });
-        if (!updated?.scoreUpdatedAt) {
-          await prisma.friend.update({
-            where: { id: f.id },
-            data: { scoreUpdatedAt: new Date() },
+          const messages = await prisma.message.findMany({
+            where: { conversationId: conv.id, senderType: 'contact' },
+            select: { content: true, sentAt: true },
+            orderBy: { sentAt: 'desc' },
+            take: 50,
           });
-        }
+
+          let appliedCount = 0;
+          for (const m of messages) {
+            if (!m.content) continue;
+            const signals = await detectSignalsFromMessage(f.orgId, m.content, f.statusRef?.name ?? null);
+            if (signals.length > 0) {
+              await applySignalsToFriend(f.id, f.orgId, signals, 'backfill');
+              appliedCount += signals.length;
+            }
+          }
+
+          // Stamp scoreUpdatedAt nếu chưa có signals nào apply (tránh re-pick)
+          const updated = await prisma.friend.findUnique({
+            where: { id: f.id },
+            select: { scoreUpdatedAt: true },
+          });
+          if (!updated?.scoreUpdatedAt) {
+            await prisma.friend.update({
+              where: { id: f.id },
+              data: { scoreUpdatedAt: new Date() },
+            });
+          }
+          return appliedCount;
+        });
+        signalsApplied += applied;
         processed++;
       } catch (err) {
         logger.warn({ err, friendId: f.id }, '[backfill-cron] skip friend');

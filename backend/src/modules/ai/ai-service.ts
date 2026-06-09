@@ -1,4 +1,4 @@
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { config } from '../../config/index.js';
 import { logger } from '../../shared/utils/logger.js';
 import { getProviderConfig, getAvailableProviders } from './provider-registry.js';
@@ -150,7 +150,7 @@ export async function generateAiOutput(input: { orgId: string; conversationId: s
   // Atomic quota check — count inside transaction to prevent TOCTOU race
   const startOfDay = new Date();
   startOfDay.setHours(0, 0, 0, 0);
-  const withinQuota = await prisma.$transaction(async (tx) => {
+  const withinQuota = await tenantTransaction(async (tx) => {
     const usedToday = await tx.aiSuggestion.count({ where: { orgId: input.orgId, createdAt: { gte: startOfDay } } });
     return usedToday < currentConfig.maxDaily;
   });

@@ -89,4 +89,53 @@ export const config = {
   kimiDefaultMoonshotV1Model: envValue('KIMI_DEFAULT_MOONSHOT_V1_MODEL') || '',
 
   isProduction: process.env.NODE_ENV === 'production',
+
+  /**
+   * Phase 1a tenant-guard 2026-06-07 — chế độ cô lập tenant ở tầng Prisma:
+   *   off     (mặc định) — không kiểm tra (hành vi cũ, zero risk khi deploy)
+   *   warn    — log cảnh báo khi org-scoped query chạy ngoài tenant context
+   *             (dùng trên staging để phát hiện call-site worker chưa withTenant)
+   *   enforce — throw khi thiếu context (bật sau khi warn sạch + RLS đã apply)
+   */
+  tenantGuardMode: (() => {
+    const v = (envValue('TENANT_GUARD_MODE') || 'off').toLowerCase();
+    return v === 'warn' || v === 'enforce' ? v : 'off';
+  })() as 'off' | 'warn' | 'enforce',
+
+  /* --- Phase 2 token hardening 2026-06-08 --- */
+  // Access token sống ngắn (chuỗi @fastify/jwt expiresIn). Mất token chỉ dùng được vài phút.
+  accessTokenTtl: envValue('ACCESS_TOKEN_TTL') || '15m',
+  // Refresh token sống dài (ms) — sliding mỗi lần xoay. Mặc định 30 ngày.
+  refreshTokenTtlMs: parseInt(envValue('REFRESH_TOKEN_TTL_MS') || String(30 * 24 * 60 * 60 * 1000)),
+  // Tuổi thọ TUYỆT ĐỐI của một family (ms) — session không xoay quá hạn này dù
+  // rotate liên tục. Chống refresh token đánh cắp sống vĩnh viễn. Mặc định 90 ngày.
+  refreshFamilyMaxMs: parseInt(envValue('REFRESH_FAMILY_MAX_MS') || String(90 * 24 * 60 * 60 * 1000)),
+  // Grace window (ms) hấp thụ race đa tab: token vừa xoay trong cửa sổ này bị
+  // gửi lại -> cấp token mới cùng family thay vì coi là reuse (đá session oan).
+  refreshGraceMs: parseInt(envValue('REFRESH_GRACE_MS') || '20000'),
+
+  /* --- Phase 3 CSP 2026-06-08 --- */
+  // Content-Security-Policy mode:
+  //   report-only (mặc định) — browser CHỈ log vi phạm, KHÔNG chặn (rollout an toàn,
+  //                            không vỡ SPA prod; quan sát rồi mới enforce)
+  //   enforce — chặn thật (bật sau khi report-only sạch trên staging)
+  //   off     — không gửi CSP header
+  cspMode: (() => {
+    const v = (envValue('CSP_MODE') || 'report-only').toLowerCase();
+    return v === 'enforce' || v === 'off' ? v : 'report-only';
+  })() as 'report-only' | 'enforce' | 'off',
+
+  // C2 2026-06-08 — bật để socket handshake TỪ CHỐI token legacy (thiếu typ:'access').
+  // Mặc định false trong giai đoạn cutover (token 7d cũ còn lưu hành). Bật true SAU
+  // khi bump jwtTokenVersion toàn bộ + telemetry xác nhận legacy hết (mọi socket ≤15').
+  socketRequireAccessTyp: (envValue('SOCKET_REQUIRE_ACCESS_TYP') || 'false').toLowerCase() === 'true',
+
+  /* --- Phase 1a RLS connection-binding 2026-06-09 (Giai đoạn 0) --- */
+  // Bật cơ chế set `app.current_org` per-connection (SET LOCAL trong transaction) để
+  // Postgres RLS đọc được tenant hiện hành. MẶC ĐỊNH false → cơ chế NẰM IM hoàn toàn
+  // (không wrap query, không đổi hành vi). Chỉ bật =true trên staging SAU khi:
+  //   (a) mọi interactive transaction đã chuyển sang tenantTransaction(),
+  //   (b) đã apply tenant-rls.sql (có clause bypass) + role app NOSUPERUSER.
+  // Bật khi RLS CHƯA apply cũng an toàn (chỉ set 1 GUC vô hại) nhưng tốn 1 round-trip/query.
+  rlsSetConfig: (envValue('RLS_SET_CONFIG') || 'false').toLowerCase() === 'true',
 };

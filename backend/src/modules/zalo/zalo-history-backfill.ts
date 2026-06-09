@@ -9,7 +9,7 @@
  * Fire-and-forget callable: errors are logged, not propagated.
  */
 import { randomUUID } from 'node:crypto';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { handleIncomingMessage } from '../chat/message-handler.js';
 import { detectContentType, extractAlbumInfo } from './zalo-message-helpers.js';
@@ -313,12 +313,13 @@ export async function backfillAccountHistory(api: any, accountId: string): Promi
   }
 
   // Sanity check: verify what actually landed in DB for this account
-  const dbCounts = await prisma.$transaction([
-    prisma.conversation.count({ where: { zaloAccountId: accountId } }),
-    prisma.message.count({
+  const dbCounts = await tenantTransaction(async (tx) => {
+    const conversations = await tx.conversation.count({ where: { zaloAccountId: accountId } });
+    const messages = await tx.message.count({
       where: { conversation: { zaloAccountId: accountId } },
-    }),
-  ]).catch(() => [0, 0] as [number, number]);
+    });
+    return [conversations, messages] as [number, number];
+  }).catch(() => [0, 0] as [number, number]);
 
   logger.info(
     `[backfill:${accountId}] Done — friends=${result.friendsSynced} groups=${result.groupsSynced} ` +

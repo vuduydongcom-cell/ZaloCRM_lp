@@ -6,6 +6,7 @@
 import cron from 'node-cron';
 import type { Server } from 'socket.io';
 import { prisma } from '../../shared/database/prisma-client.js';
+import { withTenant } from '../../shared/tenant/tenant-context.js';
 import { logger } from '../../shared/utils/logger.js';
 
 export function startAppointmentReminder(io: Server): void {
@@ -43,10 +44,12 @@ export function startAppointmentReminder(io: Server): void {
           assignedUserName: apt.assignedUser?.fullName,
         });
 
-        await prisma.appointment.update({
-          where: { id: apt.id },
-          data: { reminderSent: true },
-        });
+        await withTenant(apt.orgId, () =>
+          prisma.appointment.update({
+            where: { id: apt.id },
+            data: { reminderSent: true },
+          })
+        );
       }
 
       logger.info(`[reminder] Sent ${appointments.length} reminder(s)`);

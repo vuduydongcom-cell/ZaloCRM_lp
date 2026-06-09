@@ -20,20 +20,68 @@ api.interceptors.request.use((config) => {
 let last5xxToastAt = 0;
 const TOAST_5XX_THROTTLE_MS = 4000;
 
-// Response interceptor — global handle 401/404/5xx
+// Phase 2 token hardening 2026-06-08 — access token ngắn (15') hết hạn -> 401.
+// Tự động xoay refresh token rồi retry request, SINGLE-FLIGHT: nhiều request 401
+// đồng thời chỉ gọi /auth/refresh một lần, cùng chờ một promise.
+let refreshPromise: Promise<string> | null = null;
+
+function clearAuthAndRedirect() {
+  localStorage.removeItem('token');
+  localStorage.removeItem('refreshToken');
+  const currentPath = router.currentRoute.value.path;
+  if (currentPath !== '/login' && currentPath !== '/setup') {
+    router.replace('/login');
+  }
+}
+
+async function runRefresh(): Promise<string> {
+  const rt = localStorage.getItem('refreshToken');
+  if (!rt) throw new Error('no refresh token');
+  // axios "trần" (không qua interceptor) tránh đệ quy refresh.
+  const res = await axios.post('/api/v1/auth/refresh', { refreshToken: rt });
+  localStorage.setItem('token', res.data.token);
+  localStorage.setItem('refreshToken', res.data.refreshToken);
+  return res.data.token as string;
+}
+
+function isAuthEndpoint(url: string): boolean {
+  return url.includes('/auth/login') || url.includes('/auth/refresh') || url.includes('/setup');
+}
+
+// Response interceptor — global handle 401(refresh)/404/5xx
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
     const status = error.response?.status;
-    const url = error.config?.url ?? '';
+    const original = error.config ?? {};
+    const url = original.url ?? '';
+
+    // 401 + có refresh token + chưa retry + không phải auth endpoint -> thử xoay.
+    if (
+      status === 401 &&
+      !original._retry &&
+      !isAuthEndpoint(url) &&
+      localStorage.getItem('refreshToken')
+    ) {
+      original._retry = true;
+      try {
+        if (!refreshPromise) {
+          refreshPromise = runRefresh().finally(() => {
+            refreshPromise = null;
+          });
+        }
+        const newToken = await refreshPromise;
+        original.headers = original.headers ?? {};
+        original.headers.Authorization = `Bearer ${newToken}`;
+        return api(original); // retry request gốc với token mới
+      } catch {
+        clearAuthAndRedirect();
+        return Promise.reject(error);
+      }
+    }
 
     if (status === 401) {
-      localStorage.removeItem('token');
-      // Use Vue Router instead of hard reload to prevent redirect loops
-      const currentPath = router.currentRoute.value.path;
-      if (currentPath !== '/login' && currentPath !== '/setup') {
-        router.replace('/login');
-      }
+      clearAuthAndRedirect();
     } else if (status === 403) {
       // RBAC enforce 2026-06-08 — backend từ chối quyền. Toast, KHÔNG redirect
       // (403 có thể đến từ 1 widget phụ, không nên giật cả trang).

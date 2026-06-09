@@ -6,7 +6,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { randomUUID } from 'node:crypto';
 import type { Server } from 'socket.io';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { requireAnyGrant, requireGrant } from '../rbac/rbac-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
@@ -1998,7 +1998,7 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
         || friend.aliasInNick
         || `KH-${last4}`;
 
-      const result = await prisma.$transaction(async (tx) => {
+      const result = await tenantTransaction(async (tx) => {
         // 1. Create new Contact with friend's per-pair status/score/avatar
         const newContact = await tx.contact.create({
           data: {
@@ -2207,23 +2207,25 @@ export async function contactRoutes(app: FastifyInstance): Promise<void> {
 
       // Set parentContactId cho các contact khác trong cụm
       const childrenIds = candidate.contactIds.filter(cid => cid !== parentContactId);
-      await prisma.$transaction([
-        ...childrenIds.map(cid => prisma.contact.updateMany({
-          where: { id: cid, orgId: user.orgId, mergedInto: null, parentContactId: null },
-          data: { parentContactId },
-        })),
-        prisma.parentCandidate.update({
+      await tenantTransaction(async (tx) => {
+        for (const cid of childrenIds) {
+          await tx.contact.updateMany({
+            where: { id: cid, orgId: user.orgId, mergedInto: null, parentContactId: null },
+            data: { parentContactId },
+          });
+        }
+        await tx.parentCandidate.update({
           where: { id },
           data: { resolvedAt: new Date(), resolvedBy: user.id, dismissed: false },
-        }),
-        prisma.activityLog.create({
+        });
+        await tx.activityLog.create({
           data: {
             orgId: user.orgId, userId: user.id,
             action: 'parent_candidate_accept', entityType: 'contact', entityId: parentContactId,
             details: { candidateId: id, childrenIds, matchType: candidate.matchType },
           },
-        }),
-      ]);
+        });
+      });
       return reply.send({ accepted: true, parentContactId, childrenCount: childrenIds.length });
     } catch (err) {
       logger.error('[contacts] accept parent-candidate error:', err);

@@ -13,7 +13,7 @@
  *
  * Updates Contact.{accepted,pending,chatting}NicksCount on every transition.
  */
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { randomUUID } from 'node:crypto';
 import { zaloPool } from './zalo-pool.js';
@@ -126,7 +126,7 @@ export async function applyFriendTransition(args: {
   const { orgId, zaloAccountId, contactId, zaloUidInNick, newFriendshipStatus } = args;
   const source = args.source ?? 'event';
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     const existing = await tx.friend.findUnique({
       where: { zaloAccountId_zaloUidInNick: { zaloAccountId, zaloUidInNick } },
       select: {

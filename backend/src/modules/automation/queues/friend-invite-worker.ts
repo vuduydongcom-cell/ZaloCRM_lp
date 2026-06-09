@@ -38,6 +38,7 @@ import { Worker, DelayedError, UnrecoverableError, type Job, type WorkerOptions 
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
+import { withTenant } from '../../../shared/tenant/tenant-context.js';
 import { getBullMQRedis } from './redis-connection.js';
 import { QUEUE_NAMES, buildFriendInviteJobId } from './queue-registry.js';
 import { runAllGuards, type TriggerGuardConfig, recordNickSend, consumeQuotaAfterSend } from './worker-guards.js';
@@ -374,7 +375,8 @@ export function startFriendInviteWorker(opts?: Partial<WorkerOptions>): Worker {
 
   workerInstance = new Worker<FriendInviteJobData, FriendInviteResult>(
     QUEUE_NAMES.FRIEND_INVITE,
-    processJob,
+    // Phase 1a 2026-06-08 — tenant context cho mọi query của job.
+    (job: Job<FriendInviteJobData, FriendInviteResult>) => withTenant(job.data.orgId, () => processJob(job)),
     {
       connection: getBullMQRedis(),
       // Concurrency 1 per nick — sequential. Future: multi-worker per nick = Zalo ban risk.

@@ -25,6 +25,7 @@
 import { Worker, type Job } from 'bullmq';
 import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
+import { withTenant } from '../../../shared/tenant/tenant-context.js';
 import { getBullMQRedis } from './redis-connection.js';
 import { QUEUE_NAMES, getInternalNotifyQueue } from './queue-registry.js';
 
@@ -400,7 +401,8 @@ export function startInternalNotifyWorker(): Worker {
 
   workerInstance = new Worker<InternalNotifyJobData>(
     QUEUE_NAMES.INTERNAL_NOTIFY,
-    processJob,
+    // Phase 1a 2026-06-08 — tenant context cho mọi query của job.
+    (job: Job<InternalNotifyJobData>) => withTenant(job.data.orgId, () => processJob(job)),
     {
       connection: getBullMQRedis(),
       // Notify nhanh, không lock 1 nick — concurrency cao

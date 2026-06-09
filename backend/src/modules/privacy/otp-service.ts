@@ -14,7 +14,7 @@
  *   - Bị lock → reject cả request lẫn verify
  */
 import { randomInt, createHash } from 'node:crypto';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { zaloOps } from '../../shared/zalo-operations.js';
 import { zaloPool } from '../zalo/zalo-pool.js';
@@ -267,7 +267,7 @@ export async function requestOtp(args: {
   const otpHash = hashOtp(otp);
   const expiresAt = new Date(Date.now() + OTP_EXPIRES_MS);
 
-  const token = await prisma.$transaction(async (tx) => {
+  const token = await tenantTransaction(async (tx) => {
     // Mark previous unused tokens as used (gắn flag, không dùng được nữa)
     await tx.privacyOtpToken.updateMany({
       where: { userId: args.userId, usedAt: null, expiresAt: { gt: new Date() } },
@@ -422,7 +422,7 @@ export async function verifyOtp(args: {
   const unlockedAt = new Date();
   const expiresAt = new Date(unlockedAt.getTime() + token.sessionDurationMinutes * 60 * 1000);
 
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     // Mark token used
     await tx.privacyOtpToken.update({ where: { id: token.id }, data: { usedAt: unlockedAt } });
     // Reset failed count + clear lock
@@ -489,7 +489,7 @@ export async function verifyOtp(args: {
 
 /** Owner/admin clear lock for sale (forgot/offline Zalo recovery). */
 export async function adminResetOtpLock(targetUserId: string): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     await tx.user.update({
       where: { id: targetUserId },
       data: { privacyFailedCount: 0, privacyLockedUntil: null },

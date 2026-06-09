@@ -162,19 +162,43 @@ cloudflared tunnel run
 
 ---
 
-## Cập nhật phiên bản mới
+## Cập nhật phiên bản mới (nâng từ bản cũ lên bản hiện tại)
+
+Chạy lần lượt 4 lệnh:
 
 ```bash
 cd ZaloCRM
 
-# Tải phiên bản mới
+# 1. Tải mã nguồn phiên bản mới
 git pull
 
-# Build và khởi chạy lại
+# 2. Build lại image + khởi chạy (giữ nguyên database)
 docker compose up -d --build
+
+# 3. Cập nhật CẤU TRÚC database (BẮT BUỘC — áp các thay đổi bảng/cột mới)
+docker exec zalo-crm-app npx prisma migrate deploy
+
+# 4. Khởi động lại app để dùng cấu trúc mới
+docker compose restart app
 ```
 
-Dữ liệu không bị mất — database lưu trong Docker volume.
+Dữ liệu **không bị mất** — database nằm trong Docker volume; bước 3 chỉ **THÊM**
+bảng/cột mới, không xoá dữ liệu cũ.
+
+### Vì sao phải chạy bước 3?
+App **không** tự cập nhật database khi khởi động (cố ý, để tránh mất dữ liệu).
+Mọi thay đổi cấu trúc database được áp **thủ công** qua lệnh `prisma migrate deploy`.
+Nếu bỏ qua bước này, bản mới có thể lỗi do thiếu bảng/cột.
+
+### Lưu ý khi nâng cấp (quan trọng)
+- **Luôn dùng `migrate deploy`** (KHÔNG dùng `migrate dev`) trên server đang có dữ liệu.
+  `migrate deploy` an toàn cho database thật; `migrate dev` là lệnh dành cho máy lập trình
+  và có thể đòi reset dữ liệu.
+- Lệnh ở bước 3 **chạy được nhiều lần** mà không gây hại: phần nào database đã có rồi thì
+  nó **bỏ qua** (không tạo trùng, không lỗi). Nếu lỡ chạy lại, cứ yên tâm.
+- Nếu thấy dòng `No pending migrations to apply` ở bước 3 → database đã cập nhật đủ, không
+  cần làm gì thêm.
+- Nên **sao lưu database trước khi nâng cấp** (xem mục "Sao lưu dữ liệu" bên dưới) cho chắc.
 
 ---
 

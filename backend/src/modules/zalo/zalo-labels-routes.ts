@@ -14,7 +14,7 @@
  * Socket broadcast on change so UI auto-refresh.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 import { zaloPool } from './zalo-pool.js';
@@ -82,7 +82,7 @@ export async function syncLabelsForAccount(
   // Upsert all labels from SDK → DB.
   // Optimization: bulk read first, skip upsert nếu mọi field khớp với seed (delta path
   // thường chỉ có 1-2 labels thay đổi conversations[]).
-  const upserted = await prisma.$transaction(async (tx) => {
+  const upserted = await tenantTransaction(async (tx) => {
     // Delta mode KHÔNG delete: user assign chỉ thêm/bỏ uid khỏi conversations,
     // không xoá label. Full sync mới handle label deletion (catches external changes).
     if (!isDelta) {

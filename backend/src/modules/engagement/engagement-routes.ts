@@ -186,8 +186,9 @@ export async function registerEngagementRoutes(app: FastifyInstance): Promise<vo
     }
 
     // /office-hours 2026-06-06 — sync Auto Engagement tag sau khi re-classify (tuần tự).
-    const { syncEngagementTagsAll } = await import('./engagement-tag-service.js');
-    const tagSync = await syncEngagementTagsAll();
+    // Phase 1a: scope theo org của admin (trước đây syncEngagementTagsAll quét MỌI org).
+    const { syncEngagementTagForOrg } = await import('./engagement-tag-service.js');
+    const tagSync = await syncEngagementTagForOrg(user.orgId);
 
     return reply.send({ ok: true, updated, total: contacts.length, engagementTagsSynced: tagSync.synced });
   });

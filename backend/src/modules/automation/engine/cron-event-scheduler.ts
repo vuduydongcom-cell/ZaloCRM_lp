@@ -21,6 +21,7 @@ import cron from 'node-cron';
 import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
 import { automationEventBus } from './event-bus.js';
+import { withTenant, runSystemQuery } from '../../../shared/tenant/tenant-context.js';
 import { cleanupOldEvents, logEvent } from '../friend-invite/event-log-service.js';
 import {
   precomputeAndSeedPool,
@@ -137,10 +138,14 @@ export async function registerCronTrigger(triggerId: string): Promise<void> {
   // Always tear down existing job for this trigger first (idempotent re-register)
   unregisterCronTrigger(triggerId);
 
-  const trigger = await prisma.automationTrigger.findUnique({
-    where: { id: triggerId },
-    select: { id: true, orgId: true, eventType: true, eventFilter: true, enabled: true, name: true },
-  });
+  // Phase 1a 2026-06-08 — đăng ký lịch (setup) chưa biết org → system query.
+  // Job fire sau này (fireScheduledCronEvent) tự bọc withTenant(orgId).
+  const trigger = await runSystemQuery(() =>
+    prisma.automationTrigger.findUnique({
+      where: { id: triggerId },
+      select: { id: true, orgId: true, eventType: true, eventFilter: true, enabled: true, name: true },
+    }),
+  );
   if (!trigger) return;
   if (trigger.eventType !== 'scheduled_cron') return;
   if (!trigger.enabled) return;
@@ -179,10 +184,13 @@ async function reloadAllScheduledCronTriggers(): Promise<void> {
   for (const job of cronJobs.values()) job.stop();
   cronJobs.clear();
 
-  const triggers = await prisma.automationTrigger.findMany({
-    where: { eventType: 'scheduled_cron', enabled: true },
-    select: { id: true, orgId: true, eventFilter: true, name: true },
-  });
+  // Phase 1a 2026-06-08 — reload toàn bộ trigger cross-org (setup) → system query.
+  const triggers = await runSystemQuery(() =>
+    prisma.automationTrigger.findMany({
+      where: { eventType: 'scheduled_cron', enabled: true },
+      select: { id: true, orgId: true, eventFilter: true, name: true },
+    }),
+  );
 
   for (const t of triggers) {
     const cronExpr = extractCronExpression(t.eventFilter);
@@ -207,9 +215,12 @@ async function fireScheduledCronEvent(triggerId: string, orgId: string, cronExpr
   try {
     // Re-check trigger is still enabled (defensive — could have been disabled
     // between schedule registration and fire time without unregister called)
-    const stillEnabled = await prisma.automationTrigger.count({
-      where: { id: triggerId, enabled: true },
-    });
+    // Phase 1a 2026-06-08 — bọc withTenant(orgId) cho query org-scoped.
+    const stillEnabled = await withTenant(orgId, () =>
+      prisma.automationTrigger.count({
+        where: { id: triggerId, enabled: true },
+      }),
+    );
     if (stillEnabled === 0) {
       unregisterCronTrigger(triggerId);
       return;
@@ -239,14 +250,18 @@ async function fireBirthdayEvents(): Promise<void> {
     const month = vnNow.getMonth() + 1; // 1-12
     const day = vnNow.getDate();         // 1-31
 
-    const contacts = await prisma.$queryRaw<Array<{ id: string; org_id: string; birth_date: Date }>>`
+    // Phase 1a 2026-06-08 — quét sinh nhật toàn org (by design cross-org) → system query.
+    // Sự kiện emit per-contact mang theo org_id để materializer xử lý đúng tenant.
+    const contacts = await runSystemQuery(() =>
+      prisma.$queryRaw<Array<{ id: string; org_id: string; birth_date: Date }>>`
       SELECT id, org_id, birth_date
       FROM contacts
       WHERE birth_date IS NOT NULL
         AND EXTRACT(MONTH FROM birth_date) = ${month}
         AND EXTRACT(DAY FROM birth_date) = ${day}
         AND merged_into IS NULL
-    `;
+    `,
+    );
 
     if (contacts.length === 0) {
       logger.info('[cron-scheduler] birthday tick — 0 contacts have birthday today');
@@ -293,20 +308,24 @@ async function fireBirthdayEvents(): Promise<void> {
 async function activateScheduledTriggers(): Promise<void> {
   try {
     const now = new Date();
-    const dueTriggers = await prisma.automationTrigger.findMany({
-      where: {
-        state: 'draft',
-        scheduledAt: { lte: now },
-      },
-      select: {
-        id: true,
-        orgId: true,
-        name: true,
-        eventType: true,
-        segmentSpec: true,
-        scheduledAt: true,
-      },
-    });
+    // Phase 1a 2026-06-08 — quét trigger due cross-org ở chế độ system; mỗi
+    // trigger xử lý trong withTenant(trigger.orgId) bên dưới.
+    const dueTriggers = await runSystemQuery(() =>
+      prisma.automationTrigger.findMany({
+        where: {
+          state: 'draft',
+          scheduledAt: { lte: now },
+        },
+        select: {
+          id: true,
+          orgId: true,
+          name: true,
+          eventType: true,
+          segmentSpec: true,
+          scheduledAt: true,
+        },
+      }),
+    );
 
     if (dueTriggers.length === 0) return;
 
@@ -314,10 +333,12 @@ async function activateScheduledTriggers(): Promise<void> {
 
     for (const trigger of dueTriggers) {
       // Transactional claim: chỉ flip nếu vẫn còn state='draft' tại thời điểm update.
-      const claim = await prisma.automationTrigger.updateMany({
-        where: { id: trigger.id, state: 'draft' },
-        data: { state: 'active', enabled: true, scheduledAt: null },
-      });
+      const claim = await withTenant(trigger.orgId, () =>
+        prisma.automationTrigger.updateMany({
+          where: { id: trigger.id, state: 'draft' },
+          data: { state: 'active', enabled: true, scheduledAt: null },
+        }),
+      );
       if (claim.count === 0) {
         // Đã có instance khác (multi-pod) hoặc user manual activate/cancel kịp lúc.
         continue;
@@ -339,11 +360,14 @@ async function activateScheduledTriggers(): Promise<void> {
         }
         try {
           // Idempotent — re-run trên entries đã claim chỉ refresh queue_status.
-          await precomputeAndSeedPool({
-            triggerId: trigger.id,
-            orgId: trigger.orgId,
-            spec,
-          });
+          // Phase 1a 2026-06-08 — bọc withTenant cho prisma org-scoped bên trong.
+          await withTenant(trigger.orgId, () =>
+            precomputeAndSeedPool({
+              triggerId: trigger.id,
+              orgId: trigger.orgId,
+              spec,
+            }),
+          );
         } catch (err) {
           logger.error(
             `[cron-scheduler] precomputeAndSeedPool failed for trigger=${trigger.id}:`,
@@ -362,17 +386,19 @@ async function activateScheduledTriggers(): Promise<void> {
         }
 
         // Append-only event log (fire-and-forget).
-        void logEvent({
-          orgId: trigger.orgId,
-          triggerId: trigger.id,
-          eventType: 'scheduled_activated',
-          summary: `Mục tiêu "${trigger.name}" đã được kích hoạt tự động theo lịch hẹn`,
-          metadata: {
-            scheduledAt: trigger.scheduledAt?.toISOString() ?? null,
-            activatedAt: now.toISOString(),
-            nickCount: spec.nickIds.length,
-          },
-        });
+        void withTenant(trigger.orgId, () =>
+          logEvent({
+            orgId: trigger.orgId,
+            triggerId: trigger.id,
+            eventType: 'scheduled_activated',
+            summary: `Mục tiêu "${trigger.name}" đã được kích hoạt tự động theo lịch hẹn`,
+            metadata: {
+              scheduledAt: trigger.scheduledAt?.toISOString() ?? null,
+              activatedAt: now.toISOString(),
+              nickCount: spec.nickIds.length,
+            },
+          }),
+        );
       }
     }
   } catch (err) {
@@ -406,20 +432,24 @@ export async function activateScheduledTriggersNowForTesting(): Promise<void> {
 async function resumePausedTriggers(): Promise<void> {
   try {
     const now = new Date();
-    const dueTriggers = await prisma.automationTrigger.findMany({
-      where: {
-        state: 'paused',
-        pausedUntil: { lte: now },
-      },
-      select: {
-        id: true,
-        orgId: true,
-        name: true,
-        eventType: true,
-        segmentSpec: true,
-        pausedUntil: true,
-      },
-    });
+    // Phase 1a 2026-06-08 — quét trigger paused cross-org ở chế độ system; mỗi
+    // trigger xử lý trong withTenant(trigger.orgId) bên dưới.
+    const dueTriggers = await runSystemQuery(() =>
+      prisma.automationTrigger.findMany({
+        where: {
+          state: 'paused',
+          pausedUntil: { lte: now },
+        },
+        select: {
+          id: true,
+          orgId: true,
+          name: true,
+          eventType: true,
+          segmentSpec: true,
+          pausedUntil: true,
+        },
+      }),
+    );
 
     if (dueTriggers.length === 0) return;
 
@@ -427,10 +457,12 @@ async function resumePausedTriggers(): Promise<void> {
 
     for (const trigger of dueTriggers) {
       // Transactional claim: chỉ flip nếu vẫn paused + TTL đến hạn (chống manual resume race).
-      const claim = await prisma.automationTrigger.updateMany({
-        where: { id: trigger.id, state: 'paused', pausedUntil: { lte: now } },
-        data: { state: 'active', pausedUntil: null },
-      });
+      const claim = await withTenant(trigger.orgId, () =>
+        prisma.automationTrigger.updateMany({
+          where: { id: trigger.id, state: 'paused', pausedUntil: { lte: now } },
+          data: { state: 'active', pausedUntil: null },
+        }),
+      );
       if (claim.count === 0) continue;
 
       logger.info(
@@ -452,16 +484,18 @@ async function resumePausedTriggers(): Promise<void> {
           }
         }
 
-        void logEvent({
-          orgId: trigger.orgId,
-          triggerId: trigger.id,
-          eventType: 'auto_resumed',
-          summary: `Mục tiêu "${trigger.name}" đã tự động tiếp tục sau khi hết thời gian tạm dừng`,
-          metadata: {
-            pausedUntil: trigger.pausedUntil?.toISOString() ?? null,
-            resumedAt: now.toISOString(),
-          },
-        });
+        void withTenant(trigger.orgId, () =>
+          logEvent({
+            orgId: trigger.orgId,
+            triggerId: trigger.id,
+            eventType: 'auto_resumed',
+            summary: `Mục tiêu "${trigger.name}" đã tự động tiếp tục sau khi hết thời gian tạm dừng`,
+            metadata: {
+              pausedUntil: trigger.pausedUntil?.toISOString() ?? null,
+              resumedAt: now.toISOString(),
+            },
+          }),
+        );
       }
     }
   } catch (err) {

@@ -23,10 +23,11 @@
 //     uniq_outbox_welcome_sent_per_contact_trigger fires P2002 on the loser → DUPLICATE_SKIP.
 //  9. Honor hour 6-22 VN window
 
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
 import { zaloOps } from '../../../shared/zalo-operations.js';
 import { logEvent } from './event-log-service.js';
+import { withTenant, runSystemQuery } from '../../../shared/tenant/tenant-context.js';
 
 let probeInterval: NodeJS.Timeout | null = null;
 let busy = false;
@@ -56,12 +57,15 @@ async function isWithinWorkingHours(): Promise<boolean> {
     // Fix 2026-05-30 22:55 — lookup từ Sequence nào liên kết với outbox WELCOME_PROBE
     // đang pending (kể cả trigger completed). Trước đây query trigger.state='active'
     // bỏ sót outbox của trigger đã completed → tin chào không bao giờ gửi.
-    const seqs = await prisma.automationSequence.findMany({
-      where: {
-        triggers: { some: { eventType: 'friend_invite_to_list' } },
-      },
-      select: { runtimeRules: true },
-    });
+    // Phase 1a 2026-06-08 — working-hours lookup quét sequence cross-org → system query.
+    const seqs = await runSystemQuery(() =>
+      prisma.automationSequence.findMany({
+        where: {
+          triggers: { some: { eventType: 'friend_invite_to_list' } },
+        },
+        select: { runtimeRules: true },
+      }),
+    );
     let s = 24, e = 0;
     for (const seq of seqs) {
       const rules = seq.runtimeRules as { allowedHourRange?: [number, number] } | null;
@@ -245,17 +249,17 @@ async function processRow(row: ProbeRow): Promise<void> {
   });
   if (!nickStatusCheck || nickStatusCheck.status !== 'connected') {
     const now = new Date();
-    await prisma.$transaction([
-      prisma.friendRequestOutbox.update({
+    await tenantTransaction(async (tx) => {
+      await tx.friendRequestOutbox.update({
         where: { id: row.id },
         data: {
           // Giữ welcome_outcome=NULL để re-poll khi nick hồi
           nickFirstOfflineAt: row.nick_first_offline_at ?? now,
           welcomeLastError: `nick_offline status=${nickStatusCheck?.status ?? 'missing'}`,
         },
-      }),
+      });
       // #2 2026-06-06 — nickHoldSince ở bảng nối per-trigger (filter theo contactId denormalized).
-      prisma.triggerQueueEntry.updateMany({
+      await tx.triggerQueueEntry.updateMany({
         where: {
           contactId: row.contact_id,
           triggerId: row.trigger_id ?? undefined,
@@ -263,8 +267,8 @@ async function processRow(row: ProbeRow): Promise<void> {
           nickHoldSince: null,
         },
         data: { nickHoldSince: now },
-      }),
-    ]);
+      });
+    });
     logger.warn(
       `[welcome-probe] outbox=${row.id} nick=${row.nick_id} offline status=${nickStatusCheck?.status ?? 'missing'} — hold welcome, chờ nick hồi (Sprint v3)`,
     );
@@ -282,18 +286,18 @@ async function processRow(row: ProbeRow): Promise<void> {
       msg,
       allowStrangerMessage: !isWarm,
     });
-    await prisma.$transaction([
-      prisma.friendRequestOutbox.update({
+    await tenantTransaction(async (tx) => {
+      await tx.friendRequestOutbox.update({
         where: { id: row.id },
         // PARTIAL UNIQUE FIRES HERE on race-loss → caught below, mapped to DUPLICATE_SKIP.
         data: { welcomeOutcome: channel, welcomeSentAt: new Date() },
-      }),
-      prisma.contact.update({
+      });
+      await tx.contact.update({
         where: { id: row.contact_id },
         // Legacy hint, write-only — NOT used for gating under the new semantic.
         data: { welcomeChannel: channelLabel, welcomeSentAt: new Date() },
-      }),
-    ]);
+      });
+    });
     logger.info(`[welcome-probe] sent outbox=${row.id} channel=${channelLabel}`);
 
     // Wave 3 Event Log — welcome_sent vào Mục tiêu timeline
@@ -357,16 +361,16 @@ async function processRow(row: ProbeRow): Promise<void> {
       // như gate trên: giữ welcome_outcome=NULL, set nickFirstOfflineAt, đẩy
       // entry.nickHoldSince. Sweeper sticky-hold reset sau 23h nếu nick chưa hồi.
       const now = new Date();
-      await prisma.$transaction([
-        prisma.friendRequestOutbox.update({
+      await tenantTransaction(async (tx) => {
+        await tx.friendRequestOutbox.update({
           where: { id: row.id },
           data: {
             nickFirstOfflineAt: row.nick_first_offline_at ?? now,
             welcomeLastError: `awaiting_nick ${errMsg}`.slice(0, 500),
           },
-        }),
+        });
         // #2 2026-06-06 — nickHoldSince ở bảng nối per-trigger.
-        prisma.triggerQueueEntry.updateMany({
+        await tx.triggerQueueEntry.updateMany({
           where: {
             contactId: row.contact_id,
             triggerId: row.trigger_id ?? undefined,
@@ -374,8 +378,8 @@ async function processRow(row: ProbeRow): Promise<void> {
             nickHoldSince: null,
           },
           data: { nickHoldSince: now },
-        }),
-      ]);
+        });
+      });
       logger.warn(
         `[welcome-probe] outbox=${row.id} nick=${row.nick_id} AWAITING_NICK (race) — hold welcome: ${errMsg}`,
       );
@@ -424,6 +428,8 @@ async function runProbeTick(): Promise<void> {
     // 60s `created_at` floor doubles as a stale-claim recovery: if a prior process crashed
     // mid-tick, the row becomes re-claimable on the next eligible tick.
     const claimToken = 'claim:' + (++tickCounter) + ':' + process.pid;
+    // Phase 1a 2026-06-08 — claim quét outbox cross-org (mỗi row tự mang org_id)
+    // → chạy ở chế độ system; xử lý từng row trong withTenant(row.org_id) bên dưới.
     // Wave 2 refactor 2026-05-29 — delay floor now comes from the trigger
     // (welcome_delay_seconds), not from the organization.
     // FIX 2026-06-08 (Anh chốt): BỎ HẲN sàn welcome_min_floor_seconds. Trước đây
@@ -432,7 +438,9 @@ async function runProbeTick(): Promise<void> {
     // nhập (default 1s). Anh toàn quyền, KHÔNG còn sàn cứng chặn. Cột
     // welcome_min_floor_seconds giữ trong schema (không drop để tránh migration) nhưng
     // KHÔNG dùng nữa. Default welcome_delay_seconds đổi 60→1 ở chỗ tạo trigger.
-    const rows = await prisma.$queryRaw<ProbeRow[]>`
+    // Phase 1a: probe claim quét cross-org → bọc runSystemQuery (bypass RLS); xử lý từng
+    // row trong withTenant(org) bên dưới.
+    const rows = await runSystemQuery(() => prisma.$queryRaw<ProbeRow[]>`
       UPDATE friend_request_outbox
       SET welcome_last_error = ${claimToken}
       WHERE id IN (
@@ -454,9 +462,10 @@ async function runProbeTick(): Promise<void> {
         welcome_retry_count,
         nick_first_offline_at,
         (SELECT org_id FROM automation_triggers WHERE id = friend_request_outbox.trigger_id) AS org_id
-    `;
+    `);
     for (const row of rows) {
-      await processRow(row).catch(async (err) => {
+      // Phase 1a 2026-06-08 — mỗi outbox row xử lý trong tenant scope của org nó.
+      await withTenant(row.org_id, () => processRow(row)).catch(async (err) => {
         const errMsg = (err?.message ?? String(err)).slice(0, 500);
         logger.error(
           `[welcome-probe] processRow ${row.id} failed: ${errMsg}`,
@@ -466,10 +475,12 @@ async function runProbeTick(): Promise<void> {
         // Without this, a processRow throw leaves welcome_last_error = 'claim:...'
         // and the row is permanently filtered out by the claim WHERE.
         try {
-          await prisma.friendRequestOutbox.update({
-            where: { id: row.id },
-            data: { welcomeLastError: errMsg },
-          });
+          await withTenant(row.org_id, () =>
+            prisma.friendRequestOutbox.update({
+              where: { id: row.id },
+              data: { welcomeLastError: errMsg },
+            }),
+          );
         } catch (recoverErr) {
           logger.error(
             `[welcome-probe] failed to release claim on ${row.id}:`,

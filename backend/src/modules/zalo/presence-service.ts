@@ -16,6 +16,7 @@ import type { Server } from 'socket.io';
 import { zaloOps } from '../../shared/zalo-operations.js';
 import { prisma } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
+import { runSystemQuery } from '../../shared/tenant/tenant-context.js';
 
 export interface PresenceEntry {
   /** Unix ms timestamp from Zalo lastOnline. null = privacy off OR unknown */
@@ -97,11 +98,13 @@ async function refreshAccountPresence(accountId: string): Promise<{ onlineCount:
 
     // Emit socket to all org clients — frontend uses to update conv list dots
     if (ioRef) {
-      // Find org of this account
-      const acc = await prisma.zaloAccount.findUnique({
-        where: { id: accountId },
-        select: { orgId: true },
-      });
+      // Find org of this account (account-by-id, cross-org discovery) → runSystemQuery.
+      const acc = await runSystemQuery(() =>
+        prisma.zaloAccount.findUnique({
+          where: { id: accountId },
+          select: { orgId: true },
+        }),
+      );
       if (acc) {
         ioRef.to(`org:${acc.orgId}`).emit('friend:presence', {
           accountId,
@@ -125,10 +128,13 @@ export function startPresenceCron(io: Server | null): void {
 
   // Every 60s — bulk refresh all connected accounts
   cronJob = cron.schedule('*/1 * * * *', async () => {
-    const accounts = await prisma.zaloAccount.findMany({
-      where: { status: 'connected' },
-      select: { id: true },
-    });
+    // Cross-org sweep (mọi account connected mọi org) → runSystemQuery.
+    const accounts = await runSystemQuery(() =>
+      prisma.zaloAccount.findMany({
+        where: { status: 'connected' },
+        select: { id: true },
+      }),
+    );
     let totalOnline = 0;
     for (const acc of accounts) {
       const result = await refreshAccountPresence(acc.id);

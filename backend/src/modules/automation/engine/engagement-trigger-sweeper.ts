@@ -17,6 +17,7 @@ import cron from 'node-cron';
 import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
 import { automationEventBus } from './event-bus.js';
+import { withTenant, runSystemQuery } from '../../../shared/tenant/tenant-context.js';
 
 const TZ = 'Asia/Ho_Chi_Minh';
 const SWEEP_CRON = '*/30 * * * *'; // every 30 min
@@ -56,10 +57,14 @@ async function sweepTick(): Promise<void> {
 // ── #12 seen_no_reply ──────────────────────────────────────────────────────
 
 async function sweepSeenNoReply(): Promise<void> {
-  const triggers = await prisma.automationTrigger.findMany({
-    where: { eventType: 'seen_no_reply', enabled: true },
-    select: { id: true, orgId: true, eventFilter: true, name: true },
-  });
+  // Phase 1a 2026-06-08 — danh sách trigger trải nhiều org → query cross-org
+  // ở chế độ system; raw query quét message bọc trong withTenant(t.orgId).
+  const triggers = await runSystemQuery(() =>
+    prisma.automationTrigger.findMany({
+      where: { eventType: 'seen_no_reply', enabled: true },
+      select: { id: true, orgId: true, eventFilter: true, name: true },
+    }),
+  );
 
   if (triggers.length === 0) return;
 
@@ -71,7 +76,7 @@ async function sweepSeenNoReply(): Promise<void> {
 
       // Find messages: outgoing, seen during window, contact has not replied since seenAt.
       // JOIN conversation → get contactId. Filter org via Conversation.orgId.
-      const rows = await prisma.$queryRaw<Array<{
+      const rows = await withTenant(t.orgId, () => prisma.$queryRaw<Array<{
         message_id: string;
         contact_id: string;
         conversation_id: string;
@@ -92,7 +97,7 @@ async function sweepSeenNoReply(): Promise<void> {
               AND m2.sender_type = 'contact'
               AND m2.sent_at > m.seen_at
           )
-      `;
+      `);
 
       if (rows.length === 0) continue;
 
@@ -127,10 +132,14 @@ async function sweepSeenNoReply(): Promise<void> {
 // ── #13 silent_x_days ──────────────────────────────────────────────────────
 
 async function sweepSilentXDays(): Promise<void> {
-  const triggers = await prisma.automationTrigger.findMany({
-    where: { eventType: 'silent_x_days', enabled: true },
-    select: { id: true, orgId: true, eventFilter: true, name: true },
-  });
+  // Phase 1a 2026-06-08 — trigger list cross-org ở chế độ system; contact query
+  // bọc trong withTenant(t.orgId).
+  const triggers = await runSystemQuery(() =>
+    prisma.automationTrigger.findMany({
+      where: { eventType: 'silent_x_days', enabled: true },
+      select: { id: true, orgId: true, eventFilter: true, name: true },
+    }),
+  );
 
   if (triggers.length === 0) return;
 
@@ -142,14 +151,16 @@ async function sweepSilentXDays(): Promise<void> {
 
       // Contacts với lastInboundAt vừa cross threshold trong window (lowerBound, upperBound]
       // Index sẵn: @@index([orgId, lastInboundAt])
-      const contacts = await prisma.contact.findMany({
-        where: {
-          orgId: t.orgId,
-          mergedInto: null,
-          lastInboundAt: { gt: lowerBound, lte: upperBound },
-        },
-        select: { id: true, lastInboundAt: true },
-      });
+      const contacts = await withTenant(t.orgId, () =>
+        prisma.contact.findMany({
+          where: {
+            orgId: t.orgId,
+            mergedInto: null,
+            lastInboundAt: { gt: lowerBound, lte: upperBound },
+          },
+          select: { id: true, lastInboundAt: true },
+        }),
+      );
 
       if (contacts.length === 0) continue;
 

@@ -3,7 +3,7 @@
  * Settings UI dùng để add/edit/delete/reorder status custom.
  */
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 
@@ -101,12 +101,14 @@ export async function statusRoutes(app: FastifyInstance): Promise<void> {
     const { items } = (request.body || {}) as { items?: Array<{ id: string; order: number }> };
     if (!Array.isArray(items)) return reply.status(400).send({ error: 'items array required' });
     try {
-      await prisma.$transaction(items.map((it) =>
-        prisma.status.updateMany({
-          where: { id: it.id, orgId: user.orgId },
-          data: { order: it.order },
-        })
-      ));
+      await tenantTransaction(async (tx) => {
+        for (const it of items) {
+          await tx.status.updateMany({
+            where: { id: it.id, orgId: user.orgId },
+            data: { order: it.order },
+          });
+        }
+      });
       return reply.send({ updated: items.length });
     } catch (err) {
       logger.error('[status] reorder error:', err);

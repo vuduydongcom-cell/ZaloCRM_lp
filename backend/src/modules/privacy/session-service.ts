@@ -8,7 +8,7 @@
  * Session 4 mức thời hạn + idle timeout 30 phút.
  */
 import { randomBytes, createHash } from 'node:crypto';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 
 // Anh chốt 2026-05-22: 4 mốc thời hạn session:
 // 5p (test/nhanh), 15p (khuyến nghị), 8h (ca làm việc), 12h (nửa ngày)
@@ -146,7 +146,7 @@ export async function getStatus(userId: string): Promise<{
  * Clear fail counter + lockout + revoke sessions. (Không còn PIN hash để clear.)
  */
 export async function adminResetLock(targetUserId: string): Promise<void> {
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     await tx.user.update({
       where: { id: targetUserId },
       data: {

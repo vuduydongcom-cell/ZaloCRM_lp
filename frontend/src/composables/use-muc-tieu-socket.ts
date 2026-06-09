@@ -13,7 +13,8 @@
  *
  * Share underlying socket với use-friend-socket.ts qua socket.io-client default singleton.
  */
-import { io, type Socket } from 'socket.io-client';
+import { type Socket } from 'socket.io-client';
+import { createAppSocket } from '@/api/socket';
 import { onMounted, onUnmounted } from 'vue';
 import { useAuthStore } from '@/stores/auth';
 
@@ -33,7 +34,7 @@ let joinedOrgId: string | null = null;
 
 function ensureSocket(): Socket {
   if (!socket) {
-    socket = io({ transports: ['websocket', 'polling'] });
+    socket = createAppSocket();
     socket.on('connect', () => {
       const auth = useAuthStore();
       const orgId = auth.user?.orgId;

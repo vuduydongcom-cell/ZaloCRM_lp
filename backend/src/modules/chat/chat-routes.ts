@@ -3,7 +3,7 @@
  * All routes require JWT auth and are scoped to the user's org.
  */
 import { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { requireGrant } from '../rbac/rbac-middleware.js';
 import { requireZaloAccess } from '../zalo/zalo-access-middleware.js';
@@ -989,16 +989,19 @@ export async function chatRoutes(app: FastifyInstance) {
               select: { id: true },
             });
             if (canonical) {
-              logger.info(`[touch-profile] Conflict → merging stub ${conv.contactId} INTO canonical ${canonical.id} via globalId=${sdkGlobalId}`);
+              // narrow: conv.contactId đã được guard non-null ở L625; capture vào const để
+              // giữ narrowing trong async closure bên dưới.
+              const stubContactId = conv.contactId;
+              logger.info(`[touch-profile] Conflict → merging stub ${stubContactId} INTO canonical ${canonical.id} via globalId=${sdkGlobalId}`);
               // Re-point Conversation + Friend + Outbox + Task + Appointment to canonical
-              await prisma.$transaction([
-                prisma.conversation.updateMany({ where: { contactId: conv.contactId }, data: { contactId: canonical.id } }),
-                prisma.friend.updateMany({ where: { contactId: conv.contactId }, data: { contactId: canonical.id } }),
-                prisma.friendRequestOutbox.updateMany({ where: { contactId: conv.contactId }, data: { contactId: canonical.id } }),
-                ((prisma as any).automationTask ?? _automationTaskStub).updateMany({ where: { contactId: conv.contactId }, data: { contactId: canonical.id } }),
-                prisma.customerListEntry.updateMany({ where: { contactId: conv.contactId }, data: { contactId: canonical.id } }),
-                prisma.contact.update({ where: { id: conv.contactId }, data: { mergedInto: canonical.id, phoneNormalized: null, phone: null, updatedAt: new Date() } }),
-              ]);
+              await tenantTransaction(async (tx) => {
+                await tx.conversation.updateMany({ where: { contactId: stubContactId }, data: { contactId: canonical.id } });
+                await tx.friend.updateMany({ where: { contactId: stubContactId }, data: { contactId: canonical.id } });
+                await tx.friendRequestOutbox.updateMany({ where: { contactId: stubContactId }, data: { contactId: canonical.id } });
+                await ((tx as any).automationTask ?? _automationTaskStub).updateMany({ where: { contactId: stubContactId }, data: { contactId: canonical.id } });
+                await tx.customerListEntry.updateMany({ where: { contactId: stubContactId }, data: { contactId: canonical.id } });
+                await tx.contact.update({ where: { id: stubContactId }, data: { mergedInto: canonical.id, phoneNormalized: null, phone: null, updatedAt: new Date() } });
+              });
               return { ok: true, merged: true, intoContactId: canonical.id };
             }
           }

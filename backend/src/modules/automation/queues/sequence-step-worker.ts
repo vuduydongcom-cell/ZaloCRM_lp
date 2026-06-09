@@ -30,6 +30,7 @@ import { Worker, DelayedError, UnrecoverableError, type Job } from 'bullmq';
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
+import { withTenant } from '../../../shared/tenant/tenant-context.js';
 import { getBullMQRedis } from './redis-connection.js';
 import {
   QUEUE_NAMES,
@@ -586,7 +587,9 @@ export function startSequenceStepWorker(): Worker {
 
   workerInstance = new Worker<SequenceStepJobData, SequenceStepResult>(
     QUEUE_NAMES.SEQUENCE_STEP,
-    processJob,
+    // Phase 1a 2026-06-08 — bọc withTenant(job.data.orgId) để mọi query của job
+    // mang tenant context (tenant-guard + RLS khi enforce).
+    (job: Job<SequenceStepJobData, SequenceStepResult>) => withTenant(job.data.orgId, () => processJob(job)),
     {
       connection: getBullMQRedis(),
       // Per-nick concurrency = 1 (BullMQ global concurrency cao hơn cho cross-nick parallel).

@@ -24,7 +24,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import type { TagScope, TagSource } from '@prisma/client';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 import {
@@ -116,7 +116,7 @@ export async function registerTagRoutes(app: FastifyInstance): Promise<void> {
     if (!name || !scope || !source) return reply.code(400).send({ error: 'MISSING_FIELDS' });
 
     try {
-      const tag = await prisma.$transaction(async (tx) => {
+      const tag = await tenantTransaction(async (tx) => {
         const { findOrCreateTag } = await import('./tag-service.js');
         return findOrCreateTag(tx, { orgId: user.orgId, scope, source, name, color, emoji });
       });

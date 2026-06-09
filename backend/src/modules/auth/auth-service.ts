@@ -8,9 +8,10 @@
  * - Sale VN ít/không có email → admin tạo user chỉ với phone.
  */
 import bcrypt from 'bcryptjs';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { normalizePhone } from '../../shared/utils/phone.js';
+import { runSystemQuery } from '../../shared/tenant/tenant-context.js';
 
 export interface JwtPayload {
   id: string;
@@ -21,9 +22,35 @@ export interface JwtPayload {
   tv: number;
 }
 
+/**
+ * Phase 2 2026-06-08 — dựng JwtPayload từ userId, dùng cho /auth/refresh (sau khi
+ * xoay refresh token thì cấp access token mới). Throw nếu user không tồn tại / bị khoá.
+ */
+export async function buildAccessPayload(userId: string): Promise<JwtPayload> {
+  const user = await runSystemQuery(() =>
+    prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, email: true, phone: true, role: true, orgId: true, jwtTokenVersion: true, isActive: true },
+    }),
+  );
+  if (!user || !user.isActive) {
+    const err = new Error('Tài khoản không tồn tại hoặc đã bị khoá') as Error & { statusCode: number };
+    err.statusCode = 401;
+    throw err;
+  }
+  return {
+    id: user.id,
+    email: user.email ?? user.phone ?? user.id,
+    role: user.role,
+    orgId: user.orgId,
+    tv: user.jwtTokenVersion,
+  };
+}
+
 // Check if any users exist — true means first-run setup is needed
 export async function checkSetupStatus(): Promise<{ needsSetup: boolean }> {
-  const count = await prisma.user.count();
+  // runSystemQuery: chạy trước khi có org nào → bypass tenant-guard (Phase 1a).
+  const count = await runSystemQuery(() => prisma.user.count());
   return { needsSetup: count === 0 };
 }
 
@@ -34,7 +61,8 @@ export async function setup(
   email: string,
   password: string,
 ): Promise<JwtPayload> {
-  const existing = await prisma.user.count();
+  // runSystemQuery: setup tạo org đầu tiên → chưa có tenant context (Phase 1a).
+  const existing = await runSystemQuery(() => prisma.user.count());
   if (existing > 0) {
     const err = new Error('Setup already completed') as Error & { statusCode: number };
     err.statusCode = 400;
@@ -43,19 +71,21 @@ export async function setup(
 
   const passwordHash = await bcrypt.hash(password, 12);
 
-  const result = await prisma.$transaction(async (tx) => {
-    const org = await tx.organization.create({ data: { name: orgName } });
-    const user = await tx.user.create({
-      data: {
-        orgId: org.id,
-        email: email.toLowerCase().trim(),
-        passwordHash,
-        fullName,
-        role: 'owner',
-      },
-    });
-    return { org, user };
-  });
+  const result = await runSystemQuery(() =>
+    tenantTransaction(async (tx) => {
+      const org = await tx.organization.create({ data: { name: orgName } });
+      const user = await tx.user.create({
+        data: {
+          orgId: org.id,
+          email: email.toLowerCase().trim(),
+          passwordHash,
+          fullName,
+          role: 'owner',
+        },
+      });
+      return { org, user };
+    }),
+  );
 
   logger.info(`Setup complete — org=${result.org.id}, user=${result.user.id}`);
 
@@ -82,25 +112,25 @@ export async function login(identifier: string, password: string): Promise<JwtPa
     throw err;
   }
 
-  let user: Awaited<ReturnType<typeof prisma.user.findUnique>> = null;
-
-  if (trimmed.includes('@')) {
-    user = await prisma.user.findUnique({
-      where: { email: trimmed.toLowerCase() },
-    });
-  } else {
-    // Thử parse phone
-    const normalized = normalizePhone(trimmed);
-    if (normalized) {
-      user = await prisma.user.findUnique({
-        where: { phone: normalized },
-      });
-    }
-    // Fallback: chuỗi nguyên gốc dạng email không '@' (vd 'admin') — tìm theo email
-    if (!user) {
-      user = await prisma.user.findUnique({ where: { email: trimmed.toLowerCase() } });
-    }
-  }
+  // runSystemQuery: login tìm user theo email/phone KHI CHƯA biết org →
+  // bypass tenant-guard hợp lệ (Phase 1a).
+  const user: Awaited<ReturnType<typeof prisma.user.findUnique>> = await runSystemQuery(
+    async () => {
+      if (trimmed.includes('@')) {
+        return prisma.user.findUnique({ where: { email: trimmed.toLowerCase() } });
+      }
+      // Thử parse phone
+      const normalized = normalizePhone(trimmed);
+      let u = normalized
+        ? await prisma.user.findUnique({ where: { phone: normalized } })
+        : null;
+      // Fallback: chuỗi nguyên gốc dạng email không '@' (vd 'admin') — tìm theo email
+      if (!u) {
+        u = await prisma.user.findUnique({ where: { email: trimmed.toLowerCase() } });
+      }
+      return u;
+    },
+  );
 
   if (!user || !user.isActive) {
     const err = new Error('Email/SĐT hoặc mật khẩu không đúng') as Error & { statusCode: number };
@@ -117,9 +147,9 @@ export async function login(identifier: string, password: string): Promise<JwtPa
 
   // Phase status 4-state 2026-05-27 — set lastLoginAt async (fire-and-forget) cho status compute.
   // KHÔNG block login response — nếu update fail thì im lặng (status compute sẽ thấy null vẫn OK).
-  prisma.user
-    .update({ where: { id: user.id }, data: { lastLoginAt: new Date() } })
-    .catch(() => {});
+  runSystemQuery(() =>
+    prisma.user.update({ where: { id: user.id }, data: { lastLoginAt: new Date() } }),
+  ).catch(() => {});
 
   return {
     id: user.id,

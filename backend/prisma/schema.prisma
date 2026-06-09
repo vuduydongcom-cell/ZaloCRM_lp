@@ -266,8 +266,41 @@ model User {
   privacyOtpTokens          PrivacyOtpToken[]       @relation("PrivacyOtpUser")
   // M53 (2026-05-30): AI suggestions sale applied
   aiSuggestionsApplied      AiSuggestionApplied[]
+  // Phase 2 bảo mật 2026-06-08 — refresh token rotation
+  refreshTokens             RefreshToken[]
 
   @@map("users")
+}
+
+// Phase 2 bảo mật xác thực 2026-06-08 — refresh token rotation.
+// Access token sống ngắn (15'); refresh token opaque random sống dài (30d),
+// LƯU HASH (sha256) chứ không lưu plaintext. Mỗi lần dùng -> xoay (single-use):
+// cấp token mới cùng familyId, đánh dấu token cũ usedAt + replacedById.
+// Reuse-detection: token đã dùng (ngoài grace window) bị gửi lại -> coi là đánh
+// cắp -> revoke CẢ family. KHÔNG có cột org_id -> không dính RLS (lookup theo
+// tokenHash chạy pre-auth khi chưa biết org).
+model RefreshToken {
+  id           String    @id @default(uuid())
+  userId       String    @map("user_id")
+  // sha256(token) hex — không bao giờ lưu plaintext.
+  tokenHash    String    @unique @map("token_hash")
+  // Nhóm xoay vòng: mọi token sinh từ một lần login chia sẻ familyId.
+  familyId     String    @map("family_id")
+  expiresAt    DateTime  @map("expires_at")
+  // usedAt != null -> đã xoay (single-use). revokedAt != null -> bị thu hồi.
+  usedAt       DateTime? @map("used_at")
+  revokedAt    DateTime? @map("revoked_at")
+  replacedById String?   @map("replaced_by_id")
+  // Device/session binding metadata (#7).
+  createdIp    String?   @map("created_ip")
+  userAgent    String?   @map("user_agent")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([familyId])
+  @@map("refresh_tokens")
 }
 
 // Zalo account linked to a user (one user may own multiple Zalo accounts)

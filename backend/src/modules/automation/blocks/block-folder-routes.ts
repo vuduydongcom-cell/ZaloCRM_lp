@@ -8,7 +8,7 @@
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { randomUUID } from 'node:crypto';
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../../shared/database/prisma-client.js';
 import { authMiddleware } from '../../auth/auth-middleware.js';
 import { requireGrant } from '../../rbac/rbac-middleware.js';
 import { logger } from '../../../shared/utils/logger.js';
@@ -146,10 +146,10 @@ export async function blockFolderRoutes(app: FastifyInstance): Promise<void> {
           });
         }
         // Force: detach blocks and child folders (set their parent/folder to null)
-        await prisma.$transaction([
-          prisma.block.updateMany({ where: { folderId: id }, data: { folderId: null } }),
-          prisma.blockFolder.updateMany({ where: { parentId: id }, data: { parentId: null } }),
-        ]);
+        await tenantTransaction(async (tx) => {
+          await tx.block.updateMany({ where: { folderId: id }, data: { folderId: null } });
+          await tx.blockFolder.updateMany({ where: { parentId: id }, data: { parentId: null } });
+        });
       }
 
       await prisma.blockFolder.delete({ where: { id } });

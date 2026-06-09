@@ -9,7 +9,7 @@
 //   GET    /api/v1/automation/triggers/:id/dashboard       counters + nick load + recent entries
 
 import type { FastifyInstance } from 'fastify';
-import { prisma } from '../../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../../shared/database/prisma-client.js';
 import { authMiddleware } from '../../auth/auth-middleware.js';
 import { requireGrant } from '../../rbac/rbac-middleware.js';
 import { logger } from '../../../shared/utils/logger.js';
@@ -220,13 +220,13 @@ export async function deleteFriendInviteTrigger(opts: {
   // quan hệ với Mục tiêu này). KHÔNG còn null cột trên entry.
   // (FK trigger_queue_entries.trigger_id ON DELETE CASCADE đằng nào cũng dọn khi delete
   //  trigger; nhưng deleteMany tường minh để chạy trong cùng tx + log rõ ràng.)
-  await prisma.$transaction([
-    prisma.automationCampaign.deleteMany({ where: { orgId, triggerId: id } }),
-    prisma.triggerQueueEntry.deleteMany({ where: { triggerId: id } }),
-    prisma.friendRequestOutbox.deleteMany({ where: { triggerId: id } }),
-    prisma.automationEventLog.deleteMany({ where: { triggerId: id } }),
-    prisma.automationTrigger.delete({ where: { id } }),
-  ]);
+  await tenantTransaction(async (tx) => {
+    await tx.automationCampaign.deleteMany({ where: { orgId, triggerId: id } });
+    await tx.triggerQueueEntry.deleteMany({ where: { triggerId: id } });
+    await tx.friendRequestOutbox.deleteMany({ where: { triggerId: id } });
+    await tx.automationEventLog.deleteMany({ where: { triggerId: id } });
+    await tx.automationTrigger.delete({ where: { id } });
+  });
 
   // #2 2026-06-06 (vá lỗ hổng phát hiện 06-06h) — dọn BullMQ sequence-step jobs còn treo.
   // Trước đây delete trigger không gỡ jobs → job cũ chạy ngầm gửi nhầm. Best-effort.
@@ -916,18 +916,18 @@ export async function friendInviteRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(400).send({ error: 'already_terminal', current: trigger.state });
 
     // Cancel pool entries — in-flight processing will be released by stuck sweeper
-    await prisma.$transaction([
-      prisma.automationTrigger.update({
+    await tenantTransaction(async (tx) => {
+      await tx.automationTrigger.update({
         where: { id: trigger.id },
         // P2 Wave 4 — clear pausedUntil để sweeper không re-pickup trigger đã terminal.
         data: { state: 'cancelled', pausedUntil: null },
-      }),
+      });
       // #2 2026-06-06 — hàng đợi ở bảng nối per-trigger.
-      prisma.triggerQueueEntry.updateMany({
+      await tx.triggerQueueEntry.updateMany({
         where: { triggerId: trigger.id, queueStatus: 'queued_for_pickup' },
         data: { queueStatus: 'cancelled' },
-      }),
-    ]);
+      });
+    });
 
     // Stop workers (if no other active trigger uses them)
     const spec = trigger.segmentSpec;

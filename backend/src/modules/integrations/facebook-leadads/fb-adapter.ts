@@ -10,8 +10,9 @@
  * Issue 3: parseLead chỉ extract identifiers; processLog mới gọi Graph API (run trong worker)
  * Issue 10: throw nếu shape sai → worker mark failed
  */
-import crypto from 'node:crypto';
+import { verifyHmacSignature } from '../../../shared/security/hmac.js';
 import { prisma } from '../../../shared/database/prisma-client.js';
+import { withTenant, runSystemQuery } from '../../../shared/tenant/tenant-context.js';
 import { logger } from '../../../shared/utils/logger.js';
 import { normalizePhone } from '../../../shared/utils/phone.js';
 import { decryptToken } from '../_shared/token-encryption.util.js';
@@ -29,18 +30,9 @@ const GRAPH_API_VERSION = 'v19.0';
  * @param appSecret — App Secret từ Meta App config
  */
 export function verifyWebhook(rawBody: Buffer | string, signature: string | undefined, appSecret: string): boolean {
+  // FB gửi 'sha256=<hex>' — strip prefix rồi verify timing-safe qua util chung (Phase 5).
   if (!signature || !signature.startsWith('sha256=')) return false;
-  const expected = crypto
-    .createHmac('sha256', appSecret)
-    .update(rawBody)
-    .digest('hex');
-  const provided = signature.slice('sha256='.length);
-  // Timing-safe compare
-  try {
-    return crypto.timingSafeEqual(Buffer.from(expected, 'hex'), Buffer.from(provided, 'hex'));
-  } catch {
-    return false;
-  }
+  return verifyHmacSignature(rawBody, signature.slice('sha256='.length), appSecret);
 }
 
 /** Lightweight parse trong webhook handler — chỉ lấy leadgen_id để dedup. */
@@ -103,14 +95,16 @@ export async function processFbWebhookLog(log: { id: string; externalLeadId: str
     throw new Error(`Lead ${log.externalLeadId} not found in rawBody.entry[].changes`);
   }
 
-  // Lookup org via Page
-  const pageAccount = await prisma.facebookPageAccount.findUnique({
+  // Lookup org via Page — cross-org (pageId → org) nên bypass RLS để resolve.
+  const pageAccount = await runSystemQuery(() => prisma.facebookPageAccount.findUnique({
     where: { pageId: targetLead.pageId },
     select: { orgId: true, encryptedAccessToken: true, isActive: true, id: true },
-  });
+  }));
   if (!pageAccount) throw new Error(`No FacebookPageAccount for pageId=${targetLead.pageId} (anh chưa connect Page?)`);
   if (!pageAccount.isActive) throw new Error(`FacebookPageAccount ${targetLead.pageId} disabled (token revoked?)`);
 
+  // Phase 1a RLS (Giai đoạn 0.2): đã biết org → phần còn lại org-scoped chạy trong tenant.
+  await withTenant(pageAccount.orgId, async () => {
   const accessToken = decryptToken(pageAccount.encryptedAccessToken);
 
   // Update last webhook timestamp (best-effort)
@@ -247,4 +241,5 @@ export async function processFbWebhookLog(log: { id: string; externalLeadId: str
   }
 
   logger.info(`[fb-adapter] Lead ${targetLead.leadgenId} → list "${routing.listName}" (${routing.cacheHit ? 'cache' : 'fresh'})`);
+  });
 }

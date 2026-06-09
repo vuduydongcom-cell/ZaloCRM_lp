@@ -14,7 +14,7 @@
  */
 
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { logger } from '../../shared/utils/logger.js';
 
@@ -215,22 +215,20 @@ export async function folderRoutes(app: FastifyInstance): Promise<void> {
         }
 
         // Replace strategy: delete all + insert
-        await prisma.$transaction([
-          prisma.accountFolderMember.deleteMany({
+        await tenantTransaction(async (tx) => {
+          await tx.accountFolderMember.deleteMany({
             where: { folderId: request.params.id },
-          }),
-          ...(body.accountIds.length > 0
-            ? [
-                prisma.accountFolderMember.createMany({
-                  data: body.accountIds.map((accountId) => ({
-                    folderId: request.params.id,
-                    zaloAccountId: accountId,
-                  })),
-                  skipDuplicates: true,
-                }),
-              ]
-            : []),
-        ]);
+          });
+          if (body.accountIds.length > 0) {
+            await tx.accountFolderMember.createMany({
+              data: body.accountIds.map((accountId) => ({
+                folderId: request.params.id,
+                zaloAccountId: accountId,
+              })),
+              skipDuplicates: true,
+            });
+          }
+        });
 
         return { ok: true, count: body.accountIds.length };
       } catch (err) {
@@ -250,14 +248,14 @@ export async function folderRoutes(app: FastifyInstance): Promise<void> {
       }
 
       // Apply order
-      await prisma.$transaction(
-        body.folderIds.map((id, idx) =>
-          prisma.accountFolder.update({
-            where: { id },
+      await tenantTransaction(async (tx) => {
+        for (let idx = 0; idx < body.folderIds.length; idx++) {
+          await tx.accountFolder.update({
+            where: { id: body.folderIds[idx] },
             data: { sortOrder: idx },
-          })
-        )
-      );
+          });
+        }
+      });
 
       return { ok: true };
     } catch (err) {

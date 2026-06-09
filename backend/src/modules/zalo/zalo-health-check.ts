@@ -8,15 +8,19 @@ import { Prisma } from '@prisma/client';
 import { zaloPool } from './zalo-pool.js';
 import { prisma } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
+import { runSystemQuery } from '../../shared/tenant/tenant-context.js';
 
 export function startZaloHealthCheck(): void {
   // Every 5 minutes: check all accounts with saved sessions
   cron.schedule('*/5 * * * *', async () => {
     try {
-      const accounts = await prisma.zaloAccount.findMany({
-        where: { sessionData: { not: Prisma.JsonNull } },
-        select: { id: true, displayName: true, sessionData: true },
-      });
+      // Cross-org admin sweep (account theo sessionData, không gắn 1 org) → runSystemQuery.
+      const accounts = await runSystemQuery(() =>
+        prisma.zaloAccount.findMany({
+          where: { sessionData: { not: Prisma.JsonNull } },
+          select: { id: true, displayName: true, sessionData: true },
+        }),
+      );
 
       for (const acc of accounts) {
         const status = zaloPool.getStatus(acc.id);
@@ -39,10 +43,13 @@ export function startZaloHealthCheck(): void {
   cron.schedule('0 4 * * *', async () => {
     logger.info('[health-check] Daily session refresh starting...');
     try {
-      const accounts = await prisma.zaloAccount.findMany({
-        where: { sessionData: { not: Prisma.JsonNull } },
-        select: { id: true, sessionData: true },
-      });
+      // Cross-org admin sweep (account theo sessionData, không gắn 1 org) → runSystemQuery.
+      const accounts = await runSystemQuery(() =>
+        prisma.zaloAccount.findMany({
+          where: { sessionData: { not: Prisma.JsonNull } },
+          select: { id: true, sessionData: true },
+        }),
+      );
 
       for (const acc of accounts) {
         const session = acc.sessionData as any;

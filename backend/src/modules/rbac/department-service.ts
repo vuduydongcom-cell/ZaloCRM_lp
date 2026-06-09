@@ -14,7 +14,7 @@
  * - Anti-cycle move (trigger raise nếu new parent nằm trong subtree)
  */
 import { randomUUID } from 'node:crypto';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 
 export type DeptRole = 'leader' | 'deputy' | 'member';
 
@@ -119,7 +119,7 @@ export async function createDepartment(input: {
   if (input.name.length > 100) throw new Error('Tên phòng ban quá dài (>100 ký tự)');
 
   // FIX codex review #4: parent read + create cùng tx (atomic, không race).
-  return await prisma.$transaction(async (tx) => {
+  return await tenantTransaction(async (tx) => {
     const newId = randomUUID();
     let path = '/' + newId + '/';
     let depth = 0;
@@ -171,7 +171,7 @@ export async function updateDepartment(input: {
 
   // FIX 2026-05-21: trigger Postgres bị Prisma db push drop. Logic recompute
   // path + cascade vào TS tx (transaction atomic, all-or-nothing).
-  return await prisma.$transaction(async (tx) => {
+  return await tenantTransaction(async (tx) => {
     const existing = await tx.department.findFirst({
       where: { id: input.id, orgId: input.orgId, archivedAt: null },
       select: { id: true, parentId: true, path: true, depth: true },
@@ -246,7 +246,7 @@ export async function updateDepartment(input: {
 
 export async function archiveDepartment(orgId: string, id: string): Promise<void> {
   // FIX codex review #7: wrap count + archive trong 1 tx, lock dept row → tránh race.
-  await prisma.$transaction(async (tx) => {
+  await tenantTransaction(async (tx) => {
     const rows = await tx.$queryRawUnsafe<Array<{ id: string }>>(
       `SELECT id FROM departments
        WHERE id = $1 AND org_id = $2 AND archived_at IS NULL FOR UPDATE`,

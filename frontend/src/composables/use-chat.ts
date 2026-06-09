@@ -1,6 +1,7 @@
 import { ref, computed } from 'vue';
 import { api } from '@/api/index';
-import { io, Socket } from 'socket.io-client';
+import { Socket } from 'socket.io-client';
+import { createAppSocket } from '@/api/socket';
 import type { Contact } from '@/composables/use-contacts';
 import { useAuthStore } from '@/stores/auth';
 import { applyPendingTags } from '@/composables/use-pending-mutations';
@@ -647,7 +648,7 @@ export function useChat() {
   }
 
   function initSocket() {
-    socket = io({ transports: ['websocket', 'polling'] });
+    socket = createAppSocket();
 
     socket.on('chat:message', (data: { message: Message; conversationId: string; _privacyMeta?: { privacyMode?: string; ownerUserId?: string | null } }) => {
       // PRIVACY 2026-05-22 — backend kèm _privacyMeta cho mỗi event, FE đánh dấu

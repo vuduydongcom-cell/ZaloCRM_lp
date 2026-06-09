@@ -8,6 +8,7 @@
  */
 import cron from 'node-cron';
 import { prisma } from '../../shared/database/prisma-client.js';
+import { withTenant } from '../../shared/tenant/tenant-context.js';
 import { logger } from '../../shared/utils/logger.js';
 import { logActivity } from '../activity/activity-logger.js';
 
@@ -48,28 +49,31 @@ export async function runSilentDetection(): Promise<{ logged: number; scanned: n
 
   let logged = 0;
   for (const c of candidates) {
-    // Dedup: check đã có silent_30d log SAU lastInboundAt chưa
-    const existing = await prisma.activityLog.findFirst({
-      where: {
+    const didLog = await withTenant(c.orgId, async () => {
+      // Dedup: check đã có silent_30d log SAU lastInboundAt chưa
+      const existing = await prisma.activityLog.findFirst({
+        where: {
+          orgId: c.orgId,
+          entityType: 'contact',
+          entityId: c.id,
+          action: 'silent_30d',
+          createdAt: { gte: c.lastInboundAt || new Date(0) },
+        },
+        select: { id: true },
+      });
+      if (existing) return false;
+
+      logActivity({
         orgId: c.orgId,
+        systemSource: 'interaction_cron',
+        action: 'silent_30d',
         entityType: 'contact',
         entityId: c.id,
-        action: 'silent_30d',
-        createdAt: { gte: c.lastInboundAt || new Date(0) },
-      },
-      select: { id: true },
+        details: { lastInboundAt: c.lastInboundAt, thresholdDays: SILENT_THRESHOLD_DAYS },
+      });
+      return true;
     });
-    if (existing) continue;
-
-    logActivity({
-      orgId: c.orgId,
-      systemSource: 'interaction_cron',
-      action: 'silent_30d',
-      entityType: 'contact',
-      entityId: c.id,
-      details: { lastInboundAt: c.lastInboundAt, thresholdDays: SILENT_THRESHOLD_DAYS },
-    });
-    logged++;
+    if (didLog) logged++;
   }
 
   logger.info(`[interaction-cron] silent_30d: scanned=${candidates.length}, logged=${logged}`);

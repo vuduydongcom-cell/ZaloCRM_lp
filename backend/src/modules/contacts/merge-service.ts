@@ -3,7 +3,7 @@
  * Reassigns conversations/appointments to primary, marks secondaries as merged.
  */
 import { Prisma } from '@prisma/client';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 
 export async function mergeContacts(
   orgId: string,
@@ -11,7 +11,7 @@ export async function mergeContacts(
   primaryId: string,
   secondaryIds: string[],
 ): Promise<object> {
-  return prisma.$transaction(async (tx) => {
+  return tenantTransaction(async (tx) => {
     // Fetch primary
     const primary = await tx.contact.findUnique({ where: { id: primaryId } });
     if (!primary) throw new Error(`Contact ${primaryId} not found in org`);

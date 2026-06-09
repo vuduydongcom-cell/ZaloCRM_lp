@@ -19,6 +19,7 @@ import type { Server } from 'socket.io';
 import { prisma } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
 import { syncAccountFully } from './friend-sync-service.js';
+import { runSystemQuery } from '../../shared/tenant/tenant-context.js';
 
 // 15 phút. Đủ để bắt alias/name/avatar drift mà không spam Zalo rate-limit.
 // Sequential 50 nick × 5s = 250s = ~4min → fit trong 15min window có dư 11min.
@@ -71,10 +72,14 @@ export function stopFriendSyncCron(): void {
 
 /** Single cycle: iterate connected accounts sequential with stagger. */
 async function runCronCycle(io: Server | null): Promise<void> {
-  const accounts = await prisma.zaloAccount.findMany({
-    where: { status: 'connected' },
-    select: { id: true, orgId: true, displayName: true },
-  });
+  // Cross-org sweep (mọi account connected mọi org) → runSystemQuery. Per-account
+  // syncAccountFully tự bọc withTenant(acc.orgId) bên trong.
+  const accounts = await runSystemQuery(() =>
+    prisma.zaloAccount.findMany({
+      where: { status: 'connected' },
+      select: { id: true, orgId: true, displayName: true },
+    }),
+  );
 
   if (accounts.length === 0) {
     logger.info('[friend-sync-cron] No connected accounts, nothing to sync');

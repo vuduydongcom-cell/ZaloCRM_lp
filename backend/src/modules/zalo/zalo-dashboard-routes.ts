@@ -13,7 +13,7 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 import { authMiddleware } from '../auth/auth-middleware.js';
 import { requireGrant } from '../rbac/rbac-middleware.js';
-import { prisma } from '../../shared/database/prisma-client.js';
+import { prisma, tenantTransaction } from '../../shared/database/prisma-client.js';
 import { zaloPool } from './zalo-pool.js';
 import { logger } from '../../shared/utils/logger.js';
 import { getZaloScope, canManageAccount, requireAccountVisible } from './zalo-scope.js';
@@ -350,7 +350,7 @@ export async function zaloDashboardRoutes(app: FastifyInstance): Promise<void> {
 
       const oldOwnerId = account.ownerUserId;
 
-      await prisma.$transaction(async (tx) => {
+      await tenantTransaction(async (tx) => {
         await tx.zaloAccount.update({
           where: { id },
           data: { ownerUserId: newOwnerUserId },
@@ -543,7 +543,9 @@ export async function zaloDashboardRoutes(app: FastifyInstance): Promise<void> {
       const user = request.user!;
       const body = (request.body ?? {}) as { limits?: Record<string, { daily?: number; burst?: number; burstWindowMs?: number }> };
       const limits = body.limits ?? {};
-      const ops = [];
+      // Validate + resolve existing rows OUTSIDE tx (early-return cho validation, NULL không
+      // dùng được composite upsert nên findFirst + update/create).
+      const actions: Array<{ existingId: string | null; cat: string; daily: number; burst: number; win: number }> = [];
       for (const cat of ALL_CATEGORIES) {
         const v = limits[cat];
         if (!v) continue;
@@ -554,19 +556,21 @@ export async function zaloDashboardRoutes(app: FastifyInstance): Promise<void> {
           return reply.status(400).send({ error: `${cat}_daily_invalid`, hint: 'daily 0..100000' });
         if (!Number.isFinite(burst) || burst < 0 || burst > 1000)
           return reply.status(400).send({ error: `${cat}_burst_invalid`, hint: 'burst 0..1000' });
-        // upsert org-default theo (orgId, category, zaloAccountId NULL) — findFirst + update/create
-        // vì NULL không dùng được composite upsert.
         const existing = await prisma.sdkLimit.findFirst({
           where: { orgId: user.orgId, zaloAccountId: null, category: cat },
           select: { id: true },
         });
-        if (existing) {
-          ops.push(prisma.sdkLimit.update({ where: { id: existing.id }, data: { dailyLimit: daily, burstLimit: burst, burstWindowMs: win } }));
-        } else {
-          ops.push(prisma.sdkLimit.create({ data: { orgId: user.orgId, zaloAccountId: null, category: cat, dailyLimit: daily, burstLimit: burst, burstWindowMs: win } }));
-        }
+        actions.push({ existingId: existing?.id ?? null, cat, daily, burst, win });
       }
-      await prisma.$transaction(ops);
+      await tenantTransaction(async (tx) => {
+        for (const a of actions) {
+          if (a.existingId) {
+            await tx.sdkLimit.update({ where: { id: a.existingId }, data: { dailyLimit: a.daily, burstLimit: a.burst, burstWindowMs: a.win } });
+          } else {
+            await tx.sdkLimit.create({ data: { orgId: user.orgId, zaloAccountId: null, category: a.cat, dailyLimit: a.daily, burstLimit: a.burst, burstWindowMs: a.win } });
+          }
+        }
+      });
       invalidateLimitCache(user.orgId);
       logger.info(`[sdk-limits] org default updated by ${user.email}`);
       return { ok: true };
