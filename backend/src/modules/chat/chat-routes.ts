@@ -130,22 +130,52 @@ export async function chatRoutes(app: FastifyInstance) {
   // distinct, scope org + zalo access. Phải đăng ký TRƯỚC /conversations/:id.
   app.get('/api/v1/conversations/event-counts', async (request: FastifyRequest, _reply: FastifyReply) => {
     const user = request.user!;
+    const { folderId = '', accountId = '' } = request.query as QueryParams;
 
     const now = new Date();
     const in24h = new Date(now.getTime() + 24 * 60 * 60 * 1000);
 
     // FIX 2026-06-09 (Anh báo): badge "Tin nhắn" (chưa trả lời / bot / sale đã trả lời)
-    // PHẢI scope theo nick user được quyền — trước đây chỉ lọc org_id → user 1 nick
-    // vẫn đếm tin của TOÀN org (246/96 ảo). Khớp scope với /conversations/counts.
+    // PHẢI thỏa CẢ 2 tầng (khớp logic sidebar-tags):
+    //   Tầng 1 — getZaloScope: nick user ĐƯỢC QUYỀN xem.
+    //   Tầng 2 — Phạm vi xem (picker): folderId / accountId user đang chọn trên màn hình.
+    // Phạm vi xem GIAO với quyền. Trước đây chỉ lọc org_id → user 1 nick vẫn đếm
+    // tin TOÀN org (246/96 ảo); và bỏ qua picker → chọn 1 nick vẫn ra cả scope.
     const { getZaloScope } = await import('../zalo/zalo-scope.js');
     const zScope = await getZaloScope(user.id, user.orgId, user.role);
-    // Admin/owner → không giới hạn nick. User thường → chỉ nick accessible.
-    // Mảng rỗng (không nick nào) → điều kiện FALSE để đếm = 0 (không lọt tin org).
+
+    // 1) Phạm vi xem từ picker: folder → members; accountId → 1 nick; else → null (mọi nick).
+    let scopedAccountIds: string[] | null = null;
+    if (folderId) {
+      const folder = await prisma.accountFolder.findUnique({
+        where: { id: folderId },
+        include: { members: { select: { zaloAccountId: true } } },
+      });
+      scopedAccountIds = folder && folder.userId === user.id
+        ? folder.members.map((m) => m.zaloAccountId)
+        : []; // folder không thuộc user → rỗng
+    } else if (accountId) {
+      scopedAccountIds = [accountId];
+    }
+
+    // 2) Giao phạm vi xem với quyền (getZaloScope). Ra danh sách nick cuối cùng.
+    //    null = "mọi nick"; với admin + mọi nick → không giới hạn (effective rỗng + flag).
+    let effectiveAccountIds: string[];
+    if (scopedAccountIds !== null) {
+      effectiveAccountIds = zScope.isOrgAdmin
+        ? scopedAccountIds
+        : scopedAccountIds.filter((id) => zScope.accessibleIds.includes(id));
+    } else {
+      effectiveAccountIds = zScope.isOrgAdmin ? [] : zScope.accessibleIds;
+    }
+    const noNickRestriction = scopedAccountIds === null && zScope.isOrgAdmin;
+
+    // 3) Dựng điều kiện SQL: admin+mọi-nick → không lọc; có danh sách → IN; rỗng → FALSE (đếm 0).
     const nickScopeSql =
-      zScope.isOrgAdmin
+      noNickRestriction
         ? Prisma.empty
-        : zScope.accessibleIds.length > 0
-          ? Prisma.sql`AND cv.zalo_account_id IN (${Prisma.join(zScope.accessibleIds)})`
+        : effectiveAccountIds.length > 0
+          ? Prisma.sql`AND cv.zalo_account_id IN (${Prisma.join(effectiveAccountIds)})`
           : Prisma.sql`AND FALSE`;
 
     const [birthdayRows, appointmentSoon, appointmentOverdue, replyStateRows] = await Promise.all([

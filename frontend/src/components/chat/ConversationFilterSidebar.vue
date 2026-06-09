@@ -1396,7 +1396,12 @@ const eventCounts = ref({
 });
 async function loadEventCounts() {
   try {
-    const { data } = await api.get('/conversations/event-counts');
+    // FIX 2026-06-09: badge "Tin nhắn" PHẢI theo Phạm vi xem (folder/nick đang chọn),
+    // không chỉ theo quyền. Truyền cùng params như sidebar-tags để BE giao 2 tầng.
+    const params: Record<string, string> = {};
+    if (props.filters.state.folderId) params.folderId = props.filters.state.folderId;
+    if (props.currentAccountId) params.accountId = props.currentAccountId;
+    const { data } = await api.get('/conversations/event-counts', { params });
     eventCounts.value = {
       birthday: data.birthday ?? 0,
       appointmentSoon: data.appointmentSoon ?? 0,
@@ -1421,11 +1426,11 @@ onMounted(async () => {
   ]);
 });
 
-// 2026-06-09 — Reload tag (Zalo native + CRM Friend) khi đổi Phạm vi xem
-// (folder hoặc nick). Tag Zalo đổi theo nick active trong scope.
+// 2026-06-09 — Reload tag + badge "Tin nhắn" khi đổi Phạm vi xem (folder hoặc nick).
+// Tag Zalo + badge đếm đều đổi theo nick active trong scope.
 watch(
   () => [props.filters.state.folderId, props.currentAccountId],
-  () => { loadSidebarTags(); },
+  () => { loadSidebarTags(); loadEventCounts(); },
 );
 </script>
 
