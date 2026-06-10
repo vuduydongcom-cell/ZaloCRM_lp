@@ -109,6 +109,8 @@ import { fbLeadAdsRoutes } from './modules/integrations/facebook-leadads/fb-rout
 import { fbIntegrationRoutes } from './modules/integrations/facebook-leadads/fb-oauth.js';
 import { processFbWebhookLog } from './modules/integrations/facebook-leadads/fb-adapter.js';
 import { startOutboxWorker, registerLogProcessor } from './modules/integrations/_shared/outbox-worker.js';
+// Phase FB Lead Ads "Form" 2026-06-09 — port từ main: OAuth Page + webhook leadgen + form→list.
+import { facebookRoutes } from './modules/integrations/providers/facebook/facebook-routes.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -242,6 +244,8 @@ async function bootstrap() {
   // Phase Multi-Source Lead Ads 2026-05-27 — FB Lead Ads webhook + OAuth/status
   await app.register(fbLeadAdsRoutes);
   await app.register(fbIntegrationRoutes);
+  // Form ingestion (port từ main) — sub-path /oauth /webhook /pages /mappings (KHÔNG trùng Campaign).
+  await app.register(facebookRoutes);
   await app.register(searchRoutes);
   await app.register(publicApiRoutes);
   await app.register(webhookSettingsRoutes);
@@ -370,6 +374,13 @@ async function bootstrap() {
     if (config.nodeEnv !== 'test') {
       const { startFbPullWorker } = await import('./modules/integrations/facebook-leadads/fb-pull-worker.js');
       startFbPullWorker();
+      // Phase FB Lead Ads "Form" 2026-06-09 — BullMQ worker ingest lead + discovery form + cron refresh token.
+      const { startFacebookLeadIngestionWorker } = await import('./modules/integrations/providers/facebook/facebook-lead-worker.js');
+      void startFacebookLeadIngestionWorker();
+      const { startFormDiscoveryWorker } = await import('./modules/integrations/providers/facebook/facebook-form-discovery-worker.js');
+      void startFormDiscoveryWorker();
+      const { startFacebookTokenRefreshCron } = await import('./modules/integrations/providers/facebook/facebook-token-refresh-cron.js');
+      startFacebookTokenRefreshCron();
     }
     await eventBuffer.start(io);
     // Phase 7 — Automation engine (event bus + materializer + task worker + 3 action handlers)

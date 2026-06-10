@@ -8,10 +8,25 @@
           <p class="fb-sub">Đồng bộ lead form Facebook về Tệp khách hàng theo <code>#KEY</code> trong tên Campaign</p>
         </div>
       </div>
-      <button class="fb-btn-primary" :disabled="loading" @click="openConnect">
-        + Kết nối Page
-      </button>
+      <div class="fb-head-actions">
+        <button class="fb-btn-ghost" @click="configOpen = true">⚙ Cấu hình</button>
+        <button
+          class="fb-btn-ghost"
+          :disabled="formLocked"
+          :title="formLocked ? 'Đang kết nối ở tab Form — ngắt bên đó trước' : ''"
+          @click="onOAuthConnect"
+        >
+          Kết nối Page (OAuth)
+        </button>
+        <button class="fb-btn-primary" :disabled="loading" @click="openConnect">
+          + Kết nối Page
+        </button>
+      </div>
     </header>
+
+    <div v-if="formLocked" class="fb-lock-hint">
+      ⚠ Đang kết nối ở tab Form — ngắt bên đó trước khi kết nối bằng OAuth Campaign.
+    </div>
 
     <!-- Stats 24h -->
     <section v-if="status" class="fb-stats">
@@ -39,6 +54,15 @@
       <div class="fb-row">
         <code class="fb-mono">{{ status.webhookUrl }}</code>
         <button class="fb-btn-ghost" @click="copy(status.webhookUrl)">Copy</button>
+      </div>
+    </section>
+
+    <!-- OAuth redirect URI -->
+    <section v-if="oauthRedirectUri" class="fb-card">
+      <div class="fb-card-title">🔗 OAuth redirect URI (dán vào Meta App → Facebook Login → Valid OAuth Redirect URIs)</div>
+      <div class="fb-row">
+        <code class="fb-mono">{{ oauthRedirectUri }}</code>
+        <button class="fb-btn-ghost" @click="copy(oauthRedirectUri)">Copy</button>
       </div>
     </section>
 
@@ -200,6 +224,8 @@
         </div>
       </div>
     </Teleport>
+
+    <FacebookConfigModal v-model="configOpen" @saved="onConfigSaved" />
   </div>
 </template>
 
@@ -208,6 +234,8 @@ import { ref, reactive, onMounted } from 'vue';
 import { api } from '@/api';
 import { useToast } from '@/composables/use-toast';
 import { formatInOrgTz } from '@/composables/use-org-timezone';
+import FacebookConfigModal from '@/components/settings/facebook/FacebookConfigModal.vue';
+import { getConfig, getConnectionState, oauthStart } from '@/api/facebook-api';
 
 interface PageRow {
   id: string;
@@ -247,6 +275,35 @@ const keyStatus = reactive<Record<string, 'saving' | 'saved' | 'error'>>({});
 import { computed } from 'vue';
 const nonUnroutedLists = computed(() => lists.value.filter((l) => l.integrationKey !== '__UNROUTED__'));
 const unroutedListInfo = computed(() => lists.value.find((l) => l.integrationKey === '__UNROUTED__'));
+
+// Shared config modal + OAuth cross-lock (2-tab feature)
+const configOpen = ref(false);
+const formLocked = ref(false);
+const oauthRedirectUri = ref('');
+
+async function fetchOAuthMeta() {
+  try {
+    const [cfg, state] = await Promise.all([getConfig(), getConnectionState()]);
+    oauthRedirectUri.value = cfg.oauthRedirectUri;
+    formLocked.value = state.formConnected;
+  } catch {
+    // Non-fatal — paste-token connect still works without this metadata.
+  }
+}
+
+async function onOAuthConnect() {
+  if (formLocked.value) return;
+  try {
+    const url = await oauthStart('campaign');
+    window.location.href = url;
+  } catch {
+    toast.error('Không khởi tạo được kết nối Facebook');
+  }
+}
+
+function onConfigSaved() {
+  void fetchOAuthMeta();
+}
 
 const connectOpen = ref(false);
 const connectLoading = ref(false);
@@ -387,6 +444,7 @@ function relativeTime(iso: string): string {
 onMounted(() => {
   void fetchStatus();
   void fetchLists();
+  void fetchOAuthMeta();
 });
 </script>
 
@@ -405,6 +463,11 @@ onMounted(() => {
   border-bottom: 1px solid #e5e7eb;
 }
 .fb-head-left { display: flex; gap: 12px; align-items: center; flex: 1; }
+.fb-head-actions { display: flex; gap: 8px; align-items: center; }
+.fb-lock-hint {
+  background: #fffbeb; border: 1px solid #fde68a; color: #92400e;
+  border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px;
+}
 .fb-icon {
   width: 48px; height: 48px; background: #1877F2; border-radius: 12px;
   display: flex; align-items: center; justify-content: center;
@@ -425,7 +488,8 @@ onMounted(() => {
   padding: 6px 12px; font-size: 12px; cursor: pointer;
 }
 .fb-btn-ghost.mini { padding: 3px 8px; font-size: 11px; }
-.fb-btn-ghost:hover { background: #f3f4f6; }
+.fb-btn-ghost:hover:not(:disabled) { background: #f3f4f6; }
+.fb-btn-ghost:disabled { opacity: 0.5; cursor: not-allowed; }
 .fb-btn-danger {
   background: white; color: #dc2626; border: 1px solid #fca5a5; border-radius: 7px;
   padding: 6px 12px; font-size: 12px; cursor: pointer;

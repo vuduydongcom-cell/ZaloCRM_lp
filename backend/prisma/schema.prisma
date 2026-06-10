@@ -138,14 +138,19 @@ model Organization {
   tagGroupsV2 TagGroup[]
 
   // Phase Lead Pool 2026-05-24 — reverse relations
-  leadRequests         LeadRequest[]
-  leadPoolConfig       LeadPoolConfig?
+  leadRequests            LeadRequest[]
+  leadPoolConfig          LeadPoolConfig?
   // Phase Lead Pool admin reset 2026-05-28
-  leadPoolBonusQuotas  LeadPoolBonusQuota[]
+  leadPoolBonusQuotas     LeadPoolBonusQuota[]
   // Phase Multi-Source Lead Ads 2026-05-27
-  facebookPageAccounts FacebookPageAccount[]
+  facebookPageAccounts    FacebookPageAccount[]
   // 2026-06-06 (Anh chốt) — trần SDK mặc định hệ thống (9 category, áp cho mọi nick).
-  sdkLimits            SdkLimit[]
+  sdkLimits               SdkLimit[]
+  // Phase FB Lead Ads "Form" 2026-06-09 — port từ main (ingest lead qua Facebook Lead Form).
+  facebookPageConnections FacebookPageConnection[]
+  facebookFormMappings    FacebookFormMapping[]
+  // Phase FB 2-tab 2026-06-10 — config FB App per-org (điền qua UI, fallback env).
+  facebookAppConfig       FacebookAppConfig?
 
   @@map("organizations")
 }
@@ -226,33 +231,33 @@ model User {
   createdAt                    DateTime             @default(now()) @map("created_at")
   updatedAt                    DateTime             @updatedAt @map("updated_at")
 
-  org                       Organization            @relation(fields: [orgId], references: [id], onDelete: Cascade)
-  team                      Team?                   @relation(fields: [teamId], references: [id])
+  org                       Organization                 @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  team                      Team?                        @relation(fields: [teamId], references: [id])
   zaloAccounts              ZaloAccount[]
   zaloAccess                ZaloAccountAccess[]
-  assignedContacts          Contact[]               @relation("AssignedContacts")
+  assignedContacts          Contact[]                    @relation("AssignedContacts")
   contactAccess             ContactAccess[]
   appointments              Appointment[]
-  statusChangedAppointments Appointment[]           @relation("AppointmentStatusChanger")
-  repliedMessages           Message[]               @relation("RepliedMessages")
+  statusChangedAppointments Appointment[]                @relation("AppointmentStatusChanger")
+  repliedMessages           Message[]                    @relation("RepliedMessages")
   activityLogs              ActivityLog[]
   messageTemplates          MessageTemplate[]
-  authoredNotes             Note[]                  @relation("NoteAuthor")
+  authoredNotes             Note[]                       @relation("NoteAuthor")
   noteReactions             NoteReaction[]
   preferences               UserPreference[]
   // Phase 6+ — Inbox Triage Filter (per-user)
   accountFolders            AccountFolder[]
   savedFilterPresets        SavedFilterPreset[]
   // Phase 7 — Automation framework (createdBy backrefs)
-  createdBlocks             Block[]                 @relation("BlockCreatedBy")
-  createdBlockFolders       BlockFolder[]           @relation("BlockFolderCreatedBy")
-  ownedBlockFolders         BlockFolder[]           @relation("BlockFolderOwnerUser")
-  createdMessageTemplates   MessageTemplate[]       @relation("MessageTemplateCreatedBy")
-  createdMTFolders          MessageTemplateFolder[] @relation("MTFolderCreatedBy")
-  ownedMTFolders            MessageTemplateFolder[] @relation("MTFolderOwnerUser")
-  createdSequences          AutomationSequence[]    @relation("SequenceCreatedBy")
-  createdTriggers           AutomationTrigger[]     @relation("TriggerCreatedBy")
-  createdBroadcasts         AutomationBroadcast[]   @relation("BroadcastCreatedBy")
+  createdBlocks             Block[]                      @relation("BlockCreatedBy")
+  createdBlockFolders       BlockFolder[]                @relation("BlockFolderCreatedBy")
+  ownedBlockFolders         BlockFolder[]                @relation("BlockFolderOwnerUser")
+  createdMessageTemplates   MessageTemplate[]            @relation("MessageTemplateCreatedBy")
+  createdMTFolders          MessageTemplateFolder[]      @relation("MTFolderCreatedBy")
+  ownedMTFolders            MessageTemplateFolder[]      @relation("MTFolderOwnerUser")
+  createdSequences          AutomationSequence[]         @relation("SequenceCreatedBy")
+  createdTriggers           AutomationTrigger[]          @relation("TriggerCreatedBy")
+  createdBroadcasts         AutomationBroadcast[]        @relation("BroadcastCreatedBy")
   // Phase metrics layer 2026-05-22 — phone search by user
   phoneSearchEvents         PhoneSearchEvent[]
   systemNotifyRecipients    SystemNotifyRecipient[]
@@ -260,14 +265,16 @@ model User {
   // Phase Lead Pool 2026-05-24
   leadRequests              LeadRequest[]
   // Phase Lead Pool admin reset 2026-05-28
-  leadBonusReceived         LeadPoolBonusQuota[]    @relation("LeadPoolBonusRecipient")
-  leadBonusGranted          LeadPoolBonusQuota[]    @relation("LeadPoolBonusGranter")
+  leadBonusReceived         LeadPoolBonusQuota[]         @relation("LeadPoolBonusRecipient")
+  leadBonusGranted          LeadPoolBonusQuota[]         @relation("LeadPoolBonusGranter")
   // Phase Privacy OTP 2026-05-27
-  privacyOtpTokens          PrivacyOtpToken[]       @relation("PrivacyOtpUser")
+  privacyOtpTokens          PrivacyOtpToken[]            @relation("PrivacyOtpUser")
   // M53 (2026-05-30): AI suggestions sale applied
   aiSuggestionsApplied      AiSuggestionApplied[]
   // Phase 2 bảo mật 2026-06-08 — refresh token rotation
   refreshTokens             RefreshToken[]
+  // Phase FB Lead Ads "Form" 2026-06-09 — round-robin chia lead cho sale.
+  customerListAssignments   CustomerListSaleAssignment[]
 
   @@map("users")
 }
@@ -2602,7 +2609,11 @@ model CustomerList {
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
 
-  entries CustomerListEntry[]
+  entries              CustomerListEntry[]
+  // Phase FB Lead Ads "Form" 2026-06-09 — map form→list + round-robin sale assignment.
+  facebookFormMappings FacebookFormMapping[]
+  saleAssignments      CustomerListSaleAssignment[]
+  assignmentState      SaleAssignmentState?
 
   @@unique([orgId, integrationKey])
   @@index([orgId, status, createdAt(sort: Desc)])
@@ -2687,10 +2698,28 @@ model CustomerListEntry {
   // #2 2026-06-06 — hàng đợi tách sang bảng nối per-trigger.
   queueRows TriggerQueueEntry[]
 
+  // ── Facebook Lead Ads "Form" metadata 2026-06-09 (port từ main) ──────────
+  // Cột riêng cho lead vào qua FB Lead Form (KHÁC luồng Campaign dùng sourceMeta JSON).
+  fbLeadgenId     String?  @map("fb_leadgen_id")
+  fbAdId          String?  @map("fb_ad_id")
+  fbAdName        String?  @map("fb_ad_name")
+  fbAdsetId       String?  @map("fb_adset_id")
+  fbAdsetName     String?  @map("fb_adset_name")
+  fbCampaignId    String?  @map("fb_campaign_id")
+  fbCampaignName  String?  @map("fb_campaign_name")
+  fbFormId        String?  @map("fb_form_id")
+  fbFormName      String?  @map("fb_form_name")
+  fbInboxUrl      String?  @map("fb_inbox_url")
+  fbPlatform      String?  @map("fb_platform")
+  fbIsOrganic     Boolean? @map("fb_is_organic")
+  fbCustomAnswers Json?    @map("fb_custom_answers")
+
   @@unique([customerListId, rowIndex])
   @@index([customerListId, status])
   @@index([phoneE164]) // hot index for cross-list dedup + reverse update
   @@index([phoneLocal])
+  @@index([customerListId, fbCampaignId])
+  @@index([customerListId, fbFormId])
   @@map("customer_list_entries")
 }
 
@@ -3265,3 +3294,115 @@ model FriendRequestOutbox {
 }
 
 // (Wave 3 Event Log model định nghĩa trước đã merge với Luồng Mục Tiêu M3 model ở dòng 2186)
+
+// ════════════════════════════════════════════════════════════════════════
+// Facebook Lead Ads — "Form" ingestion (port từ main 2026-06-09)
+// ════════════════════════════════════════════════════════════════════════
+// Bổ trợ cho luồng "Campaign" (#KEY) đã có. Form: OAuth Page → webhook leadgen
+// → map form→CustomerList → round-robin chia sale. Sống song song, prefix route
+// chung /api/v1/integrations/facebook nhưng sub-path khác (/oauth /pages /mappings).
+model FacebookPageConnection {
+  id             String    @id @default(cuid())
+  orgId          String    @map("org_id")
+  pageId         String    @map("page_id")
+  pageName       String    @map("page_name")
+  accessTokenEnc String    @map("access_token_enc") // AES-256-GCM
+  tokenExpiresAt DateTime? @map("token_expires_at")
+  subscribedAt   DateTime? @map("subscribed_at")
+  status         String    @default("connected") // connected | revoked | error
+  lastError      String?   @map("last_error")
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  organization Organization          @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  mappings     FacebookFormMapping[]
+
+  @@unique([orgId, pageId])
+  @@map("facebook_page_connections")
+}
+
+model FacebookFormMapping {
+  id               String   @id @default(cuid())
+  orgId            String   @map("org_id")
+  pageConnectionId String   @map("page_connection_id")
+  formId           String   @map("form_id")
+  formName         String   @map("form_name")
+  customerListId   String   @map("customer_list_id")
+  fieldMap         Json     @default("{}") @map("field_map")
+  enabled          Boolean  @default(true)
+  createdAt        DateTime @default(now()) @map("created_at")
+
+  organization   Organization           @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  pageConnection FacebookPageConnection @relation(fields: [pageConnectionId], references: [id], onDelete: Cascade)
+  customerList   CustomerList           @relation(fields: [customerListId], references: [id], onDelete: Cascade)
+
+  @@unique([orgId, formId])
+  @@map("facebook_form_mappings")
+}
+
+model FacebookLeadEvent {
+  id          String    @id @default(cuid())
+  orgId       String    @map("org_id")
+  leadgenId   String    @unique @map("leadgen_id") // FB lead ID — idempotency
+  formId      String    @map("form_id")
+  pageId      String    @map("page_id")
+  rawPayload  Json      @map("raw_payload")
+  processedAt DateTime? @map("processed_at")
+  contactId   String?   @map("contact_id")
+  listEntryId String?   @map("list_entry_id")
+  error       String?
+  retryCount  Int       @default(0) @map("retry_count")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([orgId, formId])
+  @@index([createdAt])
+  @@map("facebook_lead_events")
+}
+
+model CustomerListSaleAssignment {
+  id             String   @id @default(cuid())
+  customerListId String   @map("customer_list_id")
+  userId         String   @map("user_id")
+  weight         Int      @default(1)
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  customerList CustomerList @relation(fields: [customerListId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([customerListId, userId])
+  @@map("customer_list_sale_assignments")
+}
+
+model SaleAssignmentState {
+  id                 String   @id @default(cuid())
+  orgId              String   @map("org_id")
+  customerListId     String   @unique @map("customer_list_id")
+  lastAssignedUserId String?  @map("last_assigned_user_id")
+  counter            Int      @default(0)
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  customerList CustomerList @relation(fields: [customerListId], references: [id], onDelete: Cascade)
+
+  @@map("sale_assignment_states")
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Facebook App config per-org (Phase FB 2-tab 2026-06-10)
+// ════════════════════════════════════════════════════════════════════════
+// Điền qua UI (nút ⚙ Cấu hình ở cả 2 tab). Code đọc DB per-org → fallback env.
+// appSecret + tokenEncKey mã hoá AT-REST bằng env TOKEN_ENCRYPTION_KEY (token-encryption.util).
+model FacebookAppConfig {
+  id                 String   @id @default(cuid())
+  orgId              String   @unique @map("org_id")
+  appId              String?  @map("app_id")
+  appSecretEnc       String?  @map("app_secret_enc") @db.Text // encryptToken(appSecret)
+  webhookVerifyToken String?  @map("webhook_verify_token")
+  tokenEncKeyEnc     String?  @map("token_enc_key_enc") @db.Text // encryptToken(FB_TOKEN_ENC_KEY)
+  createdAt          DateTime @default(now()) @map("created_at")
+  updatedAt          DateTime @updatedAt @map("updated_at")
+
+  org Organization @relation(fields: [orgId], references: [id], onDelete: Cascade)
+
+  @@map("facebook_app_configs")
+}

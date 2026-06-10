@@ -122,7 +122,7 @@ const routes: RouteRecordRaw[] = [
       // 🔌 Channels & Integrations
       { path: 'channels/zalo',             name: 'Settings.ZaloAccounts',    component: () => import('@/views/ZaloAccountsView.vue'), meta: { resource: 'zalo_account' } },
       // Phase Multi-Source Lead Ads 2026-05-27
-      { path: 'channels/facebook-leadads', name: 'Settings.FacebookLeadAds', component: () => import('@/views/settings/FacebookLeadAdsPage.vue'), meta: { resource: 'settings' } },
+      { path: 'channels/facebook-leadads', name: 'Settings.FacebookLeadAds', component: () => import('@/views/settings/FacebookLeadAdsTabsPage.vue'), meta: { resource: 'settings' } },
       { path: 'channels/rate-limit',       name: 'Settings.RateLimit',       component: () => import('@/views/settings/SettingsComingSoon.vue'), props: { feature: 'rate-limit' }, meta: { resource: 'settings' } },
       // #3 2026-06-06 (Anh chốt) — trang Cài đặt kỹ thuật automation (nhịp quét, ngưỡng kẹt/timeout)
       { path: 'channels/automation',       name: 'Settings.Automation',      component: () => import('@/views/settings/AutomationTechSettingsPage.vue'), meta: { resource: 'settings' } },
