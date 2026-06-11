@@ -589,7 +589,14 @@ export function useChat() {
         if (convDetail.data.contact) conv.contact = convDetail.data.contact;
         // friendship per-pair (counter, leadScore, status RIÊNG cặp nick×KH).
         // KHÔNG fallback contact aggregate vì các trường này khác semantics.
-        if (convDetail.data.friendship !== undefined) conv.friendship = convDetail.data.friendship;
+        // 2026-06-11 FIX (Bug auto-tag biến mất khi click): endpoint detail trả friendship
+        // là TẬP CON của list (thiếu autoTags, statusName/Color, leadScore, stuckSince,
+        // lastInbound/OutboundAt). Ghi đè cả cụm → XOÁ các field list-only → auto-tag +
+        // status pill biến mất ở cột 2. → MERGE: detail thắng field nó có, giữ field list-only.
+        if (convDetail.data.friendship !== undefined) {
+          const det = convDetail.data.friendship;
+          conv.friendship = det && conv.friendship ? { ...conv.friendship, ...det } : det;
+        }
       }
     } catch {
       // Non-critical
