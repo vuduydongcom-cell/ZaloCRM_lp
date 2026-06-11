@@ -9,6 +9,7 @@
 import { createRequire } from 'module';
 import type { Server } from 'socket.io';
 import { prisma } from '../../shared/database/prisma-client.js';
+import { runSystemQuery } from '../../shared/tenant/tenant-context.js';
 import { logger } from '../../shared/utils/logger.js';
 import { attachZaloListener, type UserInfoCacheEntry } from './zalo-listener-factory.js';
 import { emitWebhook } from '../api/webhook-service.js';
@@ -201,10 +202,10 @@ class ZaloAccountPool {
         const profiles = userInfo?.changed_profiles || {};
         const profile = profiles[ownId] || profiles[`${ownId}_0`];
         if (profile?.avatar) {
-          await prisma.zaloAccount.update({
+          await runSystemQuery(() => prisma.zaloAccount.update({
             where: { id: accountId },
             data: { avatarUrl: profile.avatar, displayName: profile.zaloName || profile.zalo_name || profile.displayName || instance.displayName },
-          });
+          }));
         }
       } catch {}
 
@@ -275,10 +276,10 @@ class ZaloAccountPool {
         const profiles = userInfo?.changed_profiles || {};
         const profile = profiles[ownId] || profiles[`${ownId}_0`];
         if (profile?.avatar) {
-          await prisma.zaloAccount.update({
+          await runSystemQuery(() => prisma.zaloAccount.update({
             where: { id: accountId },
             data: { avatarUrl: profile.avatar, displayName: profile.zaloName || profile.zalo_name || profile.displayName || instance.displayName },
-          });
+          }));
         }
       } catch {}
 
@@ -407,8 +408,9 @@ class ZaloAccountPool {
 
   // Persist session credentials to DB
   private saveCredentials(accountId: string, credentials: ZaloCredentials): void {
-    prisma.zaloAccount
-      .update({ where: { id: accountId }, data: { sessionData: credentials as any } })
+    // 2026-06-11: system-context — pool ghi nền (không tenant ctx), tránh RLS chặn.
+    runSystemQuery(() => prisma.zaloAccount
+      .update({ where: { id: accountId }, data: { sessionData: credentials as any } }))
       .catch((err) => logger.error(`[zalo:${accountId}] saveCredentials error:`, err));
   }
 
@@ -423,14 +425,28 @@ class ZaloAccountPool {
     reason?: StatusReason,
   ): Promise<void> {
     try {
-      const updated = await prisma.zaloAccount.update({
-        where: { id: accountId },
-        data: {
-          status,
-          ...(zaloUid !== null ? { zaloUid } : {}),
-          ...(status === 'connected' ? { lastConnectedAt: new Date() } : {}),
-        },
-        select: { orgId: true },
+      // 2026-06-11 FIX (gốc rễ DB status kẹt 'qr_pending' → offline sai khắp nơi: chat
+      // picker, labels, sticker, system-notify...). Hai nguyên nhân:
+      //  (a) zaloUid UNIQUE collision (P2002): nick re-QR cùng người → nick CŨ (đã archived)
+      //      vẫn giữ zaloUid → set lại trên nick mới ném P2002 → status KHÔNG ghi được.
+      //      → giải phóng uid khỏi nick khác TRƯỚC (nick đang connect là chủ hợp lệ hiện tại).
+      //  (b) pool chạy NỀN (boot reconnect/cron) không có tenant ctx → bọc runSystemQuery.
+      const updated = await runSystemQuery(async () => {
+        if (zaloUid !== null) {
+          await prisma.zaloAccount.updateMany({
+            where: { zaloUid, id: { not: accountId } },
+            data: { zaloUid: null },
+          });
+        }
+        return prisma.zaloAccount.update({
+          where: { id: accountId },
+          data: {
+            status,
+            ...(zaloUid !== null ? { zaloUid } : {}),
+            ...(status === 'connected' ? { lastConnectedAt: new Date() } : {}),
+          },
+          select: { orgId: true },
+        });
       });
 
       // Status log: chỉ ghi khi status thuộc enum ZaloStatus. Skip 'connecting' (intermediate).
@@ -438,12 +454,12 @@ class ZaloAccountPool {
       if (logStatus) {
         const logReason: StatusReason = reason ?? defaultReason(logStatus);
         // Fire-and-forget — không block updateAccountDB nếu status log lỗi.
-        void writeTransition({
+        void runSystemQuery(() => writeTransition({
           accountId,
           orgId: updated.orgId,
           status: logStatus,
           reason: logReason,
-        });
+        }));
       }
 
       // FIX 2026-06-08 (Anh chốt): nick vừa chuyển 'connected' → respawn nick-worker NGAY
