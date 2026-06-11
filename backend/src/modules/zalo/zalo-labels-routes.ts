@@ -609,7 +609,11 @@ export async function zaloLabelsRoutes(app: FastifyInstance): Promise<void> {
       });
       return {
         accounts: accounts.map(a => ({
-          id: a.id, displayName: a.displayName, avatarUrl: a.avatarUrl, status: a.status,
+          id: a.id, displayName: a.displayName, avatarUrl: a.avatarUrl,
+          // 2026-06-11: trả status SỐNG từ pool (như GET /zalo-accounts.liveStatus) thay vì
+          // DB status — DB hay kẹt 'qr_pending' sau re-QR dù pool đang connected → FE hiện
+          // "đang quét" + DISABLE nút Đồng bộ (acc.status!=='connected') dù sync chạy được.
+          status: zaloPool.getStatus(a.id),
           labels: a.zaloLabelsList.map(l => ({
             id: l.zaloLabelId,
             text: l.text,
