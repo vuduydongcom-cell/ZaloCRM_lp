@@ -183,17 +183,33 @@ export async function syncLabelsForAccount(
     });
     const groupName = `Zalo - ${account?.displayName || 'Nick'}${account?.phone ? ` (${account.phone})` : ''}`;
 
-    // Upsert CrmTagGroup for this Zalo account (managedBy='zalo_sync')
-    const group = await prisma.crmTagGroup.upsert({
+    // Upsert CrmTagGroup for this Zalo account (managedBy='zalo_sync').
+    // 2026-06-11 FIX (Bug Zalo native không hiện cột 2): collision-safe.
+    // Nick re-QR tạo account row MỚI cùng displayName → groupName trùng, nhưng group cũ
+    // thuộc nick cũ (đã archived) → upsert hit create-branch → đụng unique (orgId, name)
+    // → P2002 CRASH giữa full sync → friend.zaloLabels KHÔNG được rebuild (bước sau).
+    // Fix: nếu lookup theo (zaloAccountId, managedBy) miss → tìm theo (orgId, name) →
+    // CLAIM (reassign sang account hiện tại) thay vì create. Giống pattern CrmTag 3-bước.
+    let group = await prisma.crmTagGroup.findUnique({
       where: { zaloAccountId_managedBy: { zaloAccountId: accountId, managedBy: 'zalo_sync' } },
-      create: {
-        orgId,
-        name: groupName,
-        managedBy: 'zalo_sync',
-        zaloAccountId: accountId,
-      },
-      update: { name: groupName }, // rename khi displayName/phone đổi
     });
+    if (group) {
+      if (group.name !== groupName) {
+        group = await prisma.crmTagGroup.update({ where: { id: group.id }, data: { name: groupName } });
+      }
+    } else {
+      const byName = await prisma.crmTagGroup.findFirst({ where: { orgId, name: groupName } });
+      if (byName) {
+        group = await prisma.crmTagGroup.update({
+          where: { id: byName.id },
+          data: { zaloAccountId: accountId, managedBy: 'zalo_sync' },
+        });
+      } else {
+        group = await prisma.crmTagGroup.create({
+          data: { orgId, name: groupName, managedBy: 'zalo_sync', zaloAccountId: accountId },
+        });
+      }
+    }
 
     // Upsert CrmTag per label — 3-step để xử lý legacy data từ PR2:
     //  1. Find theo sourceZaloLabelId (PR3+ rows) → update
@@ -358,19 +374,20 @@ export async function syncLabelsForAccount(
     const addedLabels = [...newNames].filter(n => !oldNames.has(n));
     const removedLabels = [...oldNames].filter(n => !newNames.has(n));
 
-    // Mirror sang crmTagsPerNick: remove tag "🔵 {oldLabel}" + add tag "🔵 {newLabel}".
+    // Mirror sang crmTagsPerNick: strip all "🔵 ..." cũ + add "🔵 {name}" cho TẤT CẢ
+    // labels hiện tại. Phải mirror toàn bộ (không chỉ addedLabels) để handle case
+    // legacy data: friend đã có zaloLabels nhưng crmTagsPerNick chưa mirror — sync
+    // chạy lại thấy addedLabels=[] (không có label mới) → không add mirror → bug.
+    //
     // Lưu ý: emoji 🔵 (U+1F535) là surrogate pair — JS string length = 2 code units,
     // cộng dấu cách = 3 ký tự. PHẢI dùng prefix constant để strip; slice(2) sẽ để lại
     // dấu cách → labelName = " 1688" → never matches newNames → strip toàn bộ mirror tag.
     const MIRROR_PREFIX = '🔵 ';
     const oldCrmTags = Array.isArray(f.crmTagsPerNick) ? (f.crmTagsPerNick as string[]) : [];
-    let newCrmTags = oldCrmTags.filter(t => {
-      // Giữ lại tag KHÔNG phải Zalo-mirrored, hoặc tag Zalo-mirrored mà vẫn còn trong newNames
-      if (!t.startsWith(MIRROR_PREFIX)) return true;
-      const labelName = t.slice(MIRROR_PREFIX.length);
-      return newNames.has(labelName);
-    });
-    for (const labelName of addedLabels) {
+    // Giữ lại các tag user-CRM (không phải Zalo-mirror), strip toàn bộ mirror cũ
+    const newCrmTags = oldCrmTags.filter(t => !t.startsWith(MIRROR_PREFIX));
+    // Add mirror cho TẤT CẢ Zalo labels hiện tại (không chỉ added)
+    for (const labelName of newNames) {
       const mirroredTag = `🔵 ${labelName}`;
       if (!newCrmTags.includes(mirroredTag)) newCrmTags.push(mirroredTag);
     }
@@ -592,7 +609,11 @@ export async function zaloLabelsRoutes(app: FastifyInstance): Promise<void> {
       });
       return {
         accounts: accounts.map(a => ({
-          id: a.id, displayName: a.displayName, avatarUrl: a.avatarUrl, status: a.status,
+          id: a.id, displayName: a.displayName, avatarUrl: a.avatarUrl,
+          // 2026-06-11: trả status SỐNG từ pool (như GET /zalo-accounts.liveStatus) thay vì
+          // DB status — DB hay kẹt 'qr_pending' sau re-QR dù pool đang connected → FE hiện
+          // "đang quét" + DISABLE nút Đồng bộ (acc.status!=='connected') dù sync chạy được.
+          status: zaloPool.getStatus(a.id),
           labels: a.zaloLabelsList.map(l => ({
             id: l.zaloLabelId,
             text: l.text,

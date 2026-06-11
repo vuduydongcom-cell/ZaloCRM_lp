@@ -25,7 +25,10 @@ export interface ZaloAccount {
   hasProxy?: boolean;
 }
 
-export function useZaloAccounts() {
+// onStatusChange: callback gọi khi nick đổi trạng thái qua socket (connected/disconnected/
+// error/reconnect-failed). Dashboard truyền refreshAll để grid card (list enriched) tự cập
+// nhật REACTIVE — trước đây chỉ fetchAccounts (list basic) nên grid phải F5 mới thấy đổi.
+export function useZaloAccounts(opts?: { onStatusChange?: () => void }) {
   const accounts = ref<ZaloAccount[]>([]);
   const loading = ref(false);
   const adding = ref(false);
@@ -137,10 +140,11 @@ export function useZaloAccounts() {
     }
   }
 
-  async function deleteAccount(account: ZaloAccount) {
+  // purge=true → "Xoá khỏi CRM": BE wipe sessionData + nhả zaloUid (re-connect tạo nick mới).
+  async function deleteAccount(account: ZaloAccount, purge = false) {
     deleting.value = true;
     try {
-      await api.delete(`/zalo-accounts/${account.id}`);
+      await api.delete(`/zalo-accounts/${account.id}`, { params: { purge: purge ? 'true' : undefined } });
       await fetchAccounts();
       return true;
     } catch (err: any) {
@@ -174,13 +178,15 @@ export function useZaloAccounts() {
     socket.on('zalo:connected', (_data: { accountId: string }) => {
       showQRDialog.value = false;
       fetchAccounts();
+      opts?.onStatusChange?.(); // refresh grid enriched → card tự đổi sang "đang kết nối"
     });
 
-    socket.on('zalo:disconnected', (_data: { accountId: string }) => { fetchAccounts(); });
+    socket.on('zalo:disconnected', (_data: { accountId: string }) => { fetchAccounts(); opts?.onStatusChange?.(); });
 
     socket.on('zalo:error', (data: { accountId: string; error: string }) => {
       if (data.accountId === currentLoginAccountId.value) qrError.value = data.error;
       fetchAccounts();
+      opts?.onStatusChange?.();
     });
 
     socket.on('zalo:qr-expired', (data: { accountId: string }) => {
@@ -190,7 +196,7 @@ export function useZaloAccounts() {
       }
     });
 
-    socket.on('zalo:reconnect-failed', (_data: { accountId: string }) => { fetchAccounts(); });
+    socket.on('zalo:reconnect-failed', (_data: { accountId: string }) => { fetchAccounts(); opts?.onStatusChange?.(); });
 
     // fix ②: nick quét trúng zaloUid đã tồn tại (record rác đã bị BE xoá) → báo tử tế,
     // đóng QR. Khác zalo:error ở chỗ đây là tình huống nghiệp vụ (nick trùng), không phải lỗi kỹ thuật.
