@@ -240,20 +240,19 @@ export async function dashboardActionHubRoutes(app: FastifyInstance): Promise<vo
         prisma.contact.count({ where: { orgId: viewer.orgId, assignedUserId: targetUserId, createdAt: { gte: today, lt: tomorrow } } }),
       ]);
 
-      // Urgent list — top 5 conversation chưa rep, chỉ nick public (privacy blur
-      // ở client cho main-nick, BE không trả nội dung của main-nick)
-      const publicNicks = await prisma.zaloAccount.findMany({
-        where: { orgId: viewer.orgId, ownerUserId: targetUserId, privacyMode: 'sub', archivedAt: null },
+      // "Cần rep gấp" (anh chốt 2026-06-11): tin chủ nick CHƯA ĐỌC (unreadCount>0,
+      // reset 0 khi chủ nick gửi). Sắp MỚI NHẤT trước (tin vừa tới = gấp nhất).
+      // 2026-06-11 (anh chốt): GỒM CẢ nick RIÊNG TƯ nhưng nội dung tin TUÂN THỦ privacy
+      // (redact server-side qua canSeeConversationContent — không lộ tin nick main cho
+      // người ngoài). Trước đây chỉ lấy nick public.
+      const urgentNicks = await prisma.zaloAccount.findMany({
+        where: { orgId: viewer.orgId, ownerUserId: targetUserId, archivedAt: null },
         select: { id: true },
       });
-      // "Cần rep gấp" (anh chốt 2026-06-11): tin chủ nick CHƯA ĐỌC (unreadCount>0,
-      // reset 0 khi chủ nick gửi — xem message-handler updateConversationAfterMessage),
-      // chỉ 1-1 + nick công khai. Sắp MỚI NHẤT trước (tin vừa tới = gấp nhất), KHÔNG
-      // phải cũ nhất (trước đây asc → hiện toàn KH 18-20 ngày cũ, gây hiểu nhầm).
       const urgentConvs = await prisma.conversation.findMany({
         where: {
           orgId: viewer.orgId,
-          zaloAccountId: { in: publicNicks.map((n) => n.id) },
+          zaloAccountId: { in: urgentNicks.map((n) => n.id) },
           threadType: 'user',
           deletedAt: null,
           unreadCount: { gt: 0 },
@@ -271,11 +270,25 @@ export async function dashboardActionHubRoutes(app: FastifyInstance): Promise<vo
               status: true,
             },
           },
-          zaloAccount: { select: { id: true, displayName: true } },
+          // privacyMode + ownerUserId BẮT BUỘC để canSeeConversationContent quyết đúng
+          // (thiếu → coi như nick thường → LỘ tin nick main). Đừng bỏ.
+          zaloAccount: { select: { id: true, displayName: true, privacyMode: true, ownerUserId: true } },
+          // Tin nhắn cuối cho preview (rẻ với take:5). Cùng orderBy như màn chat.
+          messages: {
+            take: 1,
+            orderBy: [{ zaloMsgIdNum: { sort: 'desc', nulls: 'last' } }, { sentAt: 'desc' }],
+            select: { content: true, contentType: true, senderType: true, isDeleted: true },
+          },
         },
         orderBy: { lastMessageAt: 'desc' }, // mới nhất trước → tin vừa tới, chưa đọc = gấp nhất
         take: 5,
       });
+
+      // Privacy context — tái dùng cơ chế đã audit (chat-routes). Quyết blur theo
+      // ownerUserId của nick vs viewer (KHÔNG theo targetUserId) → manager xem-hộ nick
+      // riêng tư của NV tự động bị blur. buildPrivacyContext đọc priv_session cookie.
+      const { buildPrivacyContext, canSeeConversationContent, PRIVACY_BLUR_TOKEN } = await import('../privacy/redact.js');
+      const urgentPrivacyCtx = await buildPrivacyContext(request);
 
       // Today appointments (no privacy split — appointment không gắn nick)
       const todayAppts = await prisma.appointment.findMany({
@@ -421,16 +434,33 @@ export async function dashboardActionHubRoutes(app: FastifyInstance): Promise<vo
           newFriends: friendsToday,
           newLeads: leadsToday,
         },
-        urgent: urgentConvs.map((c) => ({
-          conversationId: c.id,
-          contactId: c.contact?.id,
-          contactName: c.contact?.fullName ?? 'Không tên',
-          contactAvatar: c.contact?.avatarUrl,
-          unreadCount: c.unreadCount,
-          lastMessageAt: c.lastMessageAt,
-          nickName: c.zaloAccount.displayName,
-          status: c.contact?.status,
-        })),
+        urgent: urgentConvs.map((c) => {
+          const canSee = canSeeConversationContent(c as { zaloAccount: { privacyMode: string; ownerUserId: string } }, urgentPrivacyCtx);
+          const m = c.messages[0];
+          // Preview: tin thu hồi → nhãn riêng; còn lại = content (cắt 60). Nick riêng tư +
+          // người ngoài → BLUR_TOKEN (FE blur). KHÔNG lộ nội dung nick main.
+          let preview = '';
+          if (m) {
+            if (m.isDeleted) preview = 'Tin nhắn đã thu hồi';
+            else if (!canSee) preview = PRIVACY_BLUR_TOKEN;
+            else if (m.contentType && m.contentType !== 'text') preview = `[${m.contentType}]`;
+            else preview = (m.content ?? '').slice(0, 60);
+          }
+          return {
+            conversationId: c.id,
+            contactId: c.contact?.id,
+            contactName: c.contact?.fullName ?? 'Không tên',
+            contactAvatar: c.contact?.avatarUrl,
+            unreadCount: c.unreadCount,                  // metadata — không blur
+            lastMessageAt: c.lastMessageAt,              // metadata — không blur
+            nickName: c.zaloAccount.displayName,
+            status: c.contact?.status,
+            // 2026-06-11 — preview tin (đã redact) + cờ blur + cờ nick riêng tư
+            messagePreview: preview,
+            redacted: !canSee && !!m && !m.isDeleted,
+            isPrivateNick: c.zaloAccount.privacyMode === 'main',
+          };
+        }),
         appointments: todayAppts.map((a) => ({
           id: a.id,
           title: a.title,

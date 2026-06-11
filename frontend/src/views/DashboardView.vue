@@ -134,13 +134,33 @@
                 <div
                   v-for="u in me?.urgent ?? []"
                   :key="u.conversationId"
-                  class="at-list-row"
+                  class="at-urgent-row"
                   @click="goToConv(u.conversationId)"
                 >
-                  <span class="at-list-row__av at-list-row__av--b">{{ initials(u.contactName) }}</span>
-                  <div>
-                    <div class="at-list-row__nm">{{ u.contactName }}</div>
-                    <div class="at-list-row__mt">Nick: {{ u.nickName }} · {{ ago(u.lastMessageAt) }}</div>
+                  <Avatar
+                    :src="u.contactAvatar || null"
+                    :name="u.contactName"
+                    :size="38"
+                    :platform="'zalo'"
+                    :gradient-seed="u.conversationId"
+                    class="at-urgent-av"
+                  />
+                  <div class="at-urgent-body">
+                    <div class="at-urgent-top">
+                      <span class="at-urgent-nm">
+                        <Lock v-if="u.isPrivateNick" :size="11" :stroke-width="2" />{{ u.contactName }}
+                      </span>
+                      <span class="at-urgent-time">{{ ago(u.lastMessageAt) }}</span>
+                    </div>
+                    <div class="at-urgent-preview" :class="{ 'is-blur': u.redacted }">
+                      {{ u.messagePreview || 'Khách vừa nhắn' }}
+                    </div>
+                    <div class="at-urgent-meta">
+                      <span v-if="urgentStatus(u.status)" class="at-statchip at-statchip--sm" :class="urgentStatus(u.status)!.cls">
+                        {{ urgentStatus(u.status)!.label }}
+                      </span>
+                      <span class="at-urgent-nick">{{ u.nickName }}</span>
+                    </div>
                   </div>
                   <span class="at-rowpill at-rowpill--unread">{{ u.unreadCount }}</span>
                 </div>
@@ -440,6 +460,7 @@ import { useAuthStore } from '@/stores/auth';
 import { useRouter } from 'vue-router';
 import { useDashboardActionHub, type PrivacySplit } from '@/composables/use-dashboard-action-hub';
 import { useAttribution } from '@/composables/use-attribution';
+import Avatar from '@/components/ui/Avatar.vue';
 import {
   Sun, Target, Users, Shield, User, ChevronDown, Lock, Search,
   Inbox, CalendarClock, Eye, Moon, CircleCheck, Flame, Bell,
@@ -517,6 +538,11 @@ const STATUS_MAP: Record<string, { label: string; cls: string }> = {
   lost: { label: 'Mất', cls: 'at-statchip--red' },
   archived: { label: 'Lưu trữ', cls: '' },
 };
+// Helper map 1 status → {label, cls} cho thẻ Cần rep gấp (null nếu không có/không map).
+function urgentStatus(status?: string): { label: string; cls: string } | null {
+  if (!status) return null;
+  return STATUS_MAP[status] ?? { label: status, cls: '' };
+}
 const statusChips = computed(() => {
   const sb = me.value?.statusBreakdown ?? [];
   return sb
@@ -658,4 +684,26 @@ function onOutsideClick(e: MouseEvent) {
 .dh-pdd-item:hover { background: var(--at-surface-soft, #f8fafc); }
 .dh-pdd-item.active { background: var(--at-action-soft, #e4f1f8); color: var(--at-action, #1786be); font-weight: 600; }
 .dh-pdd-dept { font-size: 10.5px; color: var(--at-hint, #94a3b8); }
+
+/* ── Thẻ "Cần rep gấp" nâng cấp: avatar thật + preview tin + trạng thái KH ── */
+.at-urgent-row {
+  display: grid; grid-template-columns: 38px 1fr auto; gap: 10px;
+  align-items: center; padding: 8px 12px; cursor: pointer;
+  border-bottom: 1px solid var(--at-hairline, #eef2f6);
+}
+.at-urgent-row:last-child { border-bottom: 0; }
+.at-urgent-row:hover { background: var(--at-surface-soft, #f8fafc); }
+.at-urgent-av { flex-shrink: 0; }
+.at-urgent-body { min-width: 0; }
+.at-urgent-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.at-urgent-nm { font-size: 12.5px; font-weight: 600; color: var(--at-ink, #141a24); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: inline-flex; align-items: center; gap: 3px; }
+.at-urgent-time { font-size: 10.5px; color: var(--at-hint, #94a3b8); flex-shrink: 0; }
+.at-urgent-preview {
+  font-size: 11.5px; color: var(--at-body, #475066); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.at-urgent-preview.is-blur { filter: blur(3.5px); user-select: none; letter-spacing: 1px; }
+.at-urgent-meta { display: flex; align-items: center; gap: 6px; margin-top: 3px; }
+.at-urgent-nick { font-size: 10.5px; color: var(--at-hint, #94a3b8); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.at-statchip--sm { font-size: 10px; padding: 1px 7px; }
 </style>

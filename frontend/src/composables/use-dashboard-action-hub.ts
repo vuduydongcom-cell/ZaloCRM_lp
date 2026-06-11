@@ -72,6 +72,10 @@ export interface UrgentItem {
   lastMessageAt: string;
   nickName: string;
   status?: string;
+  // 2026-06-11 — preview tin nhắn cuối (đã redact theo privacy) + cờ blur + nick riêng tư
+  messagePreview?: string;
+  redacted?: boolean;
+  isPrivateNick?: boolean;
 }
 
 export interface AppointmentItem {
