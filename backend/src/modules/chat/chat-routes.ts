@@ -98,11 +98,18 @@ export async function chatRoutes(app: FastifyInstance) {
   // NOTE: Must be registered BEFORE /api/v1/conversations/:id to avoid route conflict
   app.get('/api/v1/conversations/counts', async (request: FastifyRequest, reply: FastifyReply) => {
     const user = request.user!;
-    const { accountId = '', tab = '' } = request.query as QueryParams;
+    const { accountId = '', tab = '', threadType = '' } = request.query as QueryParams;
 
-    const baseWhere: any = { orgId: user.orgId };
+    const baseWhere: any = { orgId: user.orgId, deletedAt: null };
     if (accountId) baseWhere.zaloAccountId = accountId;
     if (tab) baseWhere.tab = tab;
+    // 2026-06-11 — đếm theo cùng key tab như list: Cá nhân/Nhóm (threadType) loại
+    // trừ hội thoại đã chuyển sang Ưu tiên (tab=other) → mặc định tab=main nếu
+    // không truyền tab. Sidebar cột 1 + mini-count cột 2 đồng bộ con số theo tab.
+    if (threadType === 'user' || threadType === 'group') {
+      baseWhere.threadType = threadType;
+      if (!tab) baseWhere.tab = 'main';
+    }
 
     // Phase Contact Scope Hybrid 2026-05-27: scope qua getZaloScope (gỡ legacy
     // 'role===member' bypass — user legacy admin nhưng RBAC group Sale vẫn bị scope).
@@ -117,13 +124,20 @@ export async function chatRoutes(app: FastifyInstance) {
       }
     }
 
-    const [unread, unreplied, total] = await Promise.all([
+    // otherUnread: số hội thoại CHƯA ĐỌC trong tab Ưu tiên (tab=other) — KHÔNG phụ
+    // thuộc tab/threadType đang chọn (tab Ưu tiên cần biết badge đậm dù đang ở tab
+    // khác). Tái dùng scope zalo ở baseWhere (org + accessible nicks), bỏ tab/threadType.
+    const otherScopeWhere: any = { orgId: user.orgId, deletedAt: null, tab: 'other', unreadCount: { gt: 0 } };
+    if (baseWhere.zaloAccountId) otherScopeWhere.zaloAccountId = baseWhere.zaloAccountId;
+
+    const [unread, unreplied, total, otherUnread] = await Promise.all([
       prisma.conversation.count({ where: { ...baseWhere, unreadCount: { gt: 0 } } }),
       prisma.conversation.count({ where: { ...baseWhere, isReplied: false } }),
       prisma.conversation.count({ where: baseWhere }),
+      prisma.conversation.count({ where: otherScopeWhere }),
     ]);
 
-    return { unread, unreplied, total };
+    return { unread, unreplied, total, otherUnread };
   });
 
   // ── Event counts cho badge cột 1 (sinh nhật 7d / hẹn 24h / quá hạn) ──────
@@ -228,6 +242,7 @@ export async function chatRoutes(app: FastifyInstance) {
         ) agg ON TRUE
         WHERE cv.org_id = ${user.orgId}
           AND cv."threadType" = 'user'
+          AND cv.deleted_at IS NULL
           AND agg.last_inbound IS NOT NULL
           ${nickScopeSql}
       `,
@@ -376,9 +391,16 @@ export async function chatRoutes(app: FastifyInstance) {
       messageReplyState = '',
     } = request.query as QueryParams;
 
-    const where: any = { orgId: user.orgId };
+    const where: any = { orgId: user.orgId, deletedAt: null };
     if (tab) where.tab = tab;
-    if (threadType === 'user' || threadType === 'group') where.threadType = threadType;
+    if (threadType === 'user' || threadType === 'group') {
+      where.threadType = threadType;
+      // 2026-06-11 — Loại trừ lẫn nhau với tab "Ưu tiên" (tab=other): tab Cá nhân /
+      // Nhóm CHỈ hiện hội thoại ở hộp Chính (tab=main). Hội thoại đã chuyển sang
+      // Ưu tiên không còn xuất hiện ở Cá nhân/Nhóm nữa (anh chốt). Nếu FE gửi kèm
+      // tab riêng thì tôn trọng tab đó (không ép).
+      if (!tab) where.tab = 'main';
+    }
 
     // Phase 6+ — folderId translate sang accountIds (override accountId/accountIds nếu set)
     let folderAccountIds: string[] | null = null;
@@ -630,6 +652,7 @@ export async function chatRoutes(app: FastifyInstance) {
           ) agg ON TRUE
           WHERE cv.org_id = ${user.orgId}
             AND cv."threadType" = 'user'
+            AND cv.deleted_at IS NULL
             AND agg.last_inbound IS NOT NULL
             AND (
               ${messageReplyState}::text = 'unanswered'  AND (agg.last_self IS NULL OR agg.last_self < agg.last_inbound)
@@ -2169,5 +2192,36 @@ export async function chatRoutes(app: FastifyInstance) {
 
     if (updated.count === 0) return reply.status(404).send({ error: 'Conversation not found' });
     return { success: true, tab };
+  });
+
+  // ── Soft-delete (ẩn) đoạn hội thoại từ cột 2 ───────────────────────────────
+  // 2026-06-11 (anh chốt) — xóa MỀM: set deletedAt, KHÔNG xóa Message vật lý.
+  // Hội thoại biến mất khỏi list/count nhưng có thể khôi phục (POST .../restore).
+  // Scope orgId + requireZaloAccess('chat') để tránh xóa chéo tenant/nick (privacy).
+  app.delete('/api/v1/conversations/:id', { preHandler: requireZaloAccess('chat') }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const user = request.user!;
+    const { id } = request.params as { id: string };
+
+    const updated = await prisma.conversation.updateMany({
+      where: { id, orgId: user.orgId, deletedAt: null },
+      data: { deletedAt: new Date() },
+    });
+
+    if (updated.count === 0) return reply.status(404).send({ error: 'Conversation not found' });
+    return { success: true };
+  });
+
+  // Khôi phục hội thoại đã ẩn (dự phòng — chưa gắn UI, để có đường khôi phục).
+  app.post('/api/v1/conversations/:id/restore', { preHandler: requireZaloAccess('chat') }, async (request: FastifyRequest, reply: FastifyReply) => {
+    const user = request.user!;
+    const { id } = request.params as { id: string };
+
+    const updated = await prisma.conversation.updateMany({
+      where: { id, orgId: user.orgId },
+      data: { deletedAt: null },
+    });
+
+    if (updated.count === 0) return reply.status(404).send({ error: 'Conversation not found' });
+    return { success: true };
   });
 }

@@ -162,8 +162,17 @@ export function useInboxFilters() {
   const loading = ref(false);
 
   // ─── Folder API ───────────────────────────────────────────────────────
+  // 2026-06-11 — số đếm folder cột 1 lọc theo CÙNG key tab đang chọn để các bộ
+  // lọc link với nhau (anh chốt). Gửi threadType/tab dịch từ activeTab xuống BE.
   async function fetchFolders() {
-    const { data } = await api.get('/account-folders');
+    const params: Record<string, string> = {};
+    switch (state.activeTab) {
+      case 'personal': params.threadType = 'user'; break;
+      case 'group':    params.threadType = 'group'; break;
+      case 'main':     params.tab = 'main'; break;
+      case 'other':    params.tab = 'other'; break;
+    }
+    const { data } = await api.get('/account-folders', { params });
     folders.value = data.folders;
   }
 

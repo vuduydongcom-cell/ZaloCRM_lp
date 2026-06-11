@@ -81,8 +81,8 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
           prisma.message.count({
             where: { conversation: { orgId, ...convFilter }, sentAt: { gte: today, lt: tomorrow } },
           }),
-          prisma.conversation.count({ where: { orgId, ...convFilter, isReplied: false, unreadCount: { gt: 0 } } }),
-          prisma.conversation.count({ where: { orgId, ...convFilter, unreadCount: { gt: 0 } } }),
+          prisma.conversation.count({ where: { orgId, ...convFilter, deletedAt: null, isReplied: false, unreadCount: { gt: 0 } } }),
+          prisma.conversation.count({ where: { orgId, ...convFilter, deletedAt: null, unreadCount: { gt: 0 } } }),
           prisma.appointment.count({
             where: { orgId, ...apptFilter, appointmentDate: { gte: today, lt: tomorrow }, status: 'scheduled' },
           }),

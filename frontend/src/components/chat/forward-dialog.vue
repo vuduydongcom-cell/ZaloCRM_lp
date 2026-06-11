@@ -67,7 +67,7 @@
               <span v-if="conv.threadType === 'group'" class="fw-group-chip">Nhóm</span>
             </span>
             <span class="fw-meta">
-              <span v-if="conv.lastMessageAt" class="fw-time">{{ formatRelativeTime(conv.lastMessageAt) }}</span>
+              <span v-if="conv.lastMessageAt" class="fw-time">{{ formatRelativeTime(conv.lastMessageAt, now) }}</span>
             </span>
           </span>
         </button>
@@ -103,7 +103,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
 
 interface ConvShape {
   id: string;
@@ -216,13 +216,21 @@ function onForward() {
   emit('update:modelValue', false);
 }
 
-// Relative time format — VN-friendly
-function formatRelativeTime(iso: string): string {
+// Live "now" ticker (2026-06-11) — cùng cơ chế ConversationList: ref `now` cập
+// nhật mỗi 30s, truyền vào formatRelativeTime làm dependency reactive để thời
+// gian tự nhảy khi để dialog mở yên (trước đây đứng yên vì lastMessageAt static).
+const now = ref(Date.now());
+let nowTimer: ReturnType<typeof setInterval> | null = null;
+onMounted(() => { nowTimer = setInterval(() => { now.value = Date.now(); }, 30000); });
+onUnmounted(() => { if (nowTimer) { clearInterval(nowTimer); nowTimer = null; } });
+
+// Relative time format — VN-friendly. _tick chỉ để tạo dependency reactive.
+function formatRelativeTime(iso: string, _tick: number = now.value): string {
   const t = new Date(iso).getTime();
   if (!Number.isFinite(t)) return '';
-  const diff = Date.now() - t;
+  const diff = _tick - t;
   const min = Math.floor(diff / 60000);
-  if (min < 1) return 'Vừa xong';
+  if (min < 1) return 'Now';
   if (min < 60) return `${min}p`;
   const hr = Math.floor(min / 60);
   if (hr < 24) return `${hr}h`;

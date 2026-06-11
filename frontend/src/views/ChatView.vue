@@ -31,6 +31,7 @@
         @filter-account="onFilterAccount"
         @update:filters="onFiltersUpdate"
         @conversation-moved="onConversationMoved"
+        @conversation-deleted="onConversationDeleted"
         @compose-opened="onComposeOpened"
       >
         <template #filters>
@@ -38,6 +39,7 @@
             :filters="inboxFilters"
             :total-count="conversations.length"
             :counts="conversationCounts"
+            :priority-has-unread="priorityHasUnread"
           />
         </template>
       </ConversationList>
@@ -112,6 +114,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { api } from '@/api/index';
 import { useToast } from '@/composables/use-toast';
 import ConversationList from '@/components/chat/ConversationList.vue';
 import MessageThread from '@/components/chat/MessageThread.vue';
@@ -220,6 +223,22 @@ const totalUnreadCount = computed(() =>
   conversations.value.reduce((sum, c) => sum + ((c as any).unreadCount || 0), 0)
 );
 
+// 2026-06-11 — tab "Ưu tiên" (tab=other) KHÔNG hiện số nhưng IN ĐẬM khi còn hội
+// thoại chưa đọc. Lấy từ backend (otherUnread) vì khi đang ở tab khác, list cột 2
+// không chứa conv tab Ưu tiên. Refresh khi mount / sau move / sau delete.
+const priorityUnreadCount = ref(0);
+const priorityHasUnread = computed(() => priorityUnreadCount.value > 0);
+async function refreshPriorityUnread() {
+  try {
+    const params: Record<string, string> = {};
+    if (accountFilter.value) params.accountId = accountFilter.value;
+    const res = await api.get('/conversations/counts', { params });
+    priorityUnreadCount.value = res.data?.otherUnread ?? 0;
+  } catch {
+    /* non-critical badge */
+  }
+}
+
 const conversationCounts = computed(() => {
   const list = conversations.value;
   const unread = list.filter((c) => ((c as any).unreadCount || 0) > 0).length;
@@ -248,6 +267,8 @@ watch(
     const params = inboxFilters.buildQueryParams();
     extraFilters.value = params;
     fetchConversations();
+    // Bộ lọc link với nhau: số đếm folder cột 1 lọc theo cùng tab (anh chốt).
+    void inboxFilters.fetchFolders();
   },
 );
 watch(
@@ -390,6 +411,20 @@ function onFiltersUpdate(params: Record<string, string>) {
 function onConversationMoved(_id: string, _tab: string) {
   // bypassCache: conv vừa move qua tab khác → cache cũ sẽ flicker conv tại tab cũ
   fetchConversations({ bypassCache: true });
+  // Move có thể đẩy conv chưa đọc vào/ra tab Ưu tiên → cập nhật badge đậm.
+  void refreshPriorityUnread();
+}
+
+// Xóa mềm hội thoại từ cột 2: gỡ optimistic khỏi list, rời conv nếu đang mở,
+// rồi refetch (bypassCache để khỏi flicker conv đã ẩn) + cập nhật badge Ưu tiên.
+function onConversationDeleted(id: string) {
+  const idx = conversations.value.findIndex((c) => c.id === id);
+  if (idx !== -1) conversations.value.splice(idx, 1);
+  if (selectedConvId.value === id) {
+    router.push({ name: 'Chat' }).catch(() => {});
+  }
+  fetchConversations({ bypassCache: true });
+  void refreshPriorityUnread();
 }
 
 // Khi user tạo conv mới từ "Tin nhắn mới" dialog → refresh list + nav vào conv đó.
@@ -471,6 +506,7 @@ onMounted(async () => {
     restoreScope();
     extraFilters.value = inboxFilters.buildQueryParams();
     fetchConversations();
+    void refreshPriorityUnread(); // badge đậm tab Ưu tiên
     fetchAiConfig();
     initSocket();
     registerSocketListeners(getSocket());

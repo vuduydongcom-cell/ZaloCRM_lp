@@ -128,7 +128,7 @@
               {{ displayName(conv) }}
             </div>
             <div class="ci-meta-right">
-              <div class="ci-time">{{ formatTime(conv.lastMessageAt) }}</div>
+              <div class="ci-time">{{ formatTime(conv.lastMessageAt, now) }}</div>
               <div
                 v-if="conv.unreadCount > 0 && conv.id !== selectedId"
                 class="ci-unread-count"
@@ -209,25 +209,43 @@
       </div>
     </div>
 
-    <!-- Context menu (right-click) -->
-    <v-menu v-model="contextMenu.show" :target="[contextMenu.x, contextMenu.y]" location="end">
-      <v-list density="compact">
-        <v-list-item
-          v-if="activeTab === 'main'"
-          prepend-icon="mdi-archive-arrow-down-outline"
-          @click="moveConversation(contextMenu.convId, 'other')"
-        >
-          <v-list-item-title>Chuyển sang tab Khác</v-list-item-title>
-        </v-list-item>
-        <v-list-item
-          v-else
-          prepend-icon="mdi-archive-arrow-up-outline"
-          @click="moveConversation(contextMenu.convId, 'main')"
-        >
-          <v-list-item-title>Chuyển sang tab Chính</v-list-item-title>
-        </v-list-item>
-      </v-list>
-    </v-menu>
+    <!-- Context menu cột 2 (right-click) — clone giao diện + responsive cột 3 -->
+    <ConversationContextMenu
+      v-model="contextMenu.show"
+      :position="{ x: contextMenu.x, y: contextMenu.y }"
+      :active-tab="activeTabKey || activeTab"
+      :is-following="contextMenu.isFollowing"
+      :follow-busy="contextMenu.followBusy"
+      :can-follow="!!(contextMenu.contactId && contextMenu.nickId)"
+      @move-other="moveConversation(contextMenu.convId, 'other')"
+      @move-main="moveConversation(contextMenu.convId, 'main')"
+      @toggle-follow="toggleFollowFromMenu"
+      @delete="askDeleteConversation"
+    />
+
+    <!-- Hộp xác nhận Xóa đoạn hội thoại (UI đẹp, Enter = Xóa) -->
+    <Teleport to="body">
+      <div v-if="deleteDialog.show" class="del-overlay" @click.self="closeDeleteDialog">
+        <div class="del-card" role="dialog" aria-modal="true" @keydown.enter.prevent="confirmDeleteConversation" @keydown.esc="closeDeleteDialog">
+          <div class="del-icon">
+            <svg viewBox="0 0 24 24" width="26" height="26" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/>
+            </svg>
+          </div>
+          <div class="del-title">Xóa đoạn hội thoại?</div>
+          <div class="del-desc">
+            Hội thoại sẽ được ẩn khỏi danh sách. Tin nhắn vẫn được giữ lại và có thể khôi phục sau.
+          </div>
+          <div class="del-actions">
+            <button class="del-btn del-btn--ghost" @click="closeDeleteDialog">Hủy</button>
+            <button ref="delConfirmBtn" class="del-btn del-btn--danger" :disabled="deleteDialog.busy" @click="confirmDeleteConversation">
+              {{ deleteDialog.busy ? 'Đang xóa…' : 'Xóa' }}
+            </button>
+          </div>
+          <div class="del-hint">Nhấn <kbd>Enter</kbd> để xóa · <kbd>Esc</kbd> để hủy</div>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- Compose new message dialog — chỉ mở SAU khi chọn nick từ NickPickerPopup -->
     <NewMessageDialog
@@ -260,7 +278,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, watch, onMounted, computed, nextTick } from 'vue';
+import { ref, reactive, watch, onMounted, onUnmounted, computed, nextTick } from 'vue';
 import type { Conversation, AiSentiment } from '@/composables/use-chat';
 import { api } from '@/api/index';
 // Icon chrome — Lucide line (anh chốt 2026-06-08, bỏ ký tự thô).
@@ -268,6 +286,7 @@ import { ChevronUp as ChevronUpIcon, X as XIcon } from 'lucide-vue-next';
 import AiSentimentBadge from '@/components/ai/ai-sentiment-badge.vue';
 import Avatar from '@/components/ui/Avatar.vue';
 import NewMessageDialog from '@/components/chat/NewMessageDialog.vue';
+import ConversationContextMenu from '@/components/chat/conversation-context-menu.vue';
 import NickPickerPopup from '@/components/zalo-accounts/NickPickerPopup.vue';
 import ZaloBrandIcon from '@/components/icons/ZaloBrandIcon.vue';
 import { loadTagDefs, isZaloManaged, cleanTagName, tagColor } from '@/composables/use-crm-tag-defs';
@@ -310,6 +329,7 @@ const emit = defineEmits<{
   'update:filters': [params: Record<string, string>];
   'tab-changed': [tab: string];
   'conversation-moved': [id: string, tab: string];
+  'conversation-deleted': [id: string];
   'compose-opened': [conversationId: string];
 }>();
 
@@ -383,8 +403,35 @@ onMounted(() => { if (props.autoComposePhone) triggerAutoCompose(props.autoCompo
 // ── Tab state ──────────────────────────────────────────────────────────────
 const activeTab = ref<'main' | 'other'>('main');
 
+// ── Live "now" ticker (2026-06-11) ──────────────────────────────────────────
+// Bug fix: thời gian tương đối ("Now", "1p", "2p"...) ở mỗi hàng hội thoại trước
+// đây KHÔNG tự nhảy khi để UI yên — vì formatTime() chỉ chạy lại khi conv.lastMessageAt
+// đổi (static). Tạo ref `now` cập nhật mỗi 30s + truyền vào formatTime làm dependency
+// reactive → Vue re-render time mỗi 30s mà không cần reload/đổi hội thoại.
+const now = ref(Date.now());
+let nowTimer: ReturnType<typeof setInterval> | null = null;
+function tickNow() { now.value = Date.now(); }
+onMounted(() => {
+  nowTimer = setInterval(tickNow, 30000);
+  // Snap lại ngay khi tab được focus lại (browser throttle setInterval ở tab nền).
+  document.addEventListener('visibilitychange', onVisibilityTick);
+});
+onUnmounted(() => {
+  if (nowTimer) { clearInterval(nowTimer); nowTimer = null; }
+  document.removeEventListener('visibilitychange', onVisibilityTick);
+});
+function onVisibilityTick() { if (!document.hidden) tickNow(); }
+
 // ── Context menu state ─────────────────────────────────────────────────────
-const contextMenu = reactive({ show: false, x: 0, y: 0, convId: '' });
+const contextMenu = reactive({
+  show: false, x: 0, y: 0, convId: '',
+  // 2026-06-11 — phục vụ item "Theo dõi" (reuse care-session) + "Xóa hội thoại".
+  contactId: '', nickId: '', isFollowing: false, followBusy: false,
+});
+
+// Hộp xác nhận xóa hội thoại
+const deleteDialog = reactive({ show: false, convId: '', busy: false });
+const delConfirmBtn = ref<HTMLButtonElement | null>(null);
 
 // ── Filter state ────────────────────────────────────────────────────────────
 const filters = reactive({
@@ -527,7 +574,13 @@ function openContextMenu(event: MouseEvent, conv: Conversation) {
   contextMenu.x = event.clientX;
   contextMenu.y = event.clientY;
   contextMenu.convId = conv.id;
+  contextMenu.contactId = conv.contact?.id ?? '';
+  contextMenu.nickId = conv.zaloAccount?.id ?? '';
+  contextMenu.isFollowing = false;
+  contextMenu.followBusy = false;
   contextMenu.show = true;
+  // Lấy trạng thái theo dõi hiện tại (nếu đủ contact+nick) để hiện đúng nhãn.
+  void fetchListenStatusForMenu();
 }
 
 async function moveConversation(convId: string, targetTab: string) {
@@ -537,6 +590,76 @@ async function moveConversation(convId: string, targetTab: string) {
     emit('conversation-moved', convId, targetTab);
   } catch (err) {
     console.error('Failed to move conversation:', err);
+  }
+}
+
+// ── Theo dõi (reuse care-session manual listen — KHÔNG tạo logic mới) ─────────
+// Endpoint + payload giống AutomationCardList.vue (contactId + nickId).
+async function fetchListenStatusForMenu() {
+  if (!contextMenu.contactId || !contextMenu.nickId) {
+    contextMenu.isFollowing = false;
+    return;
+  }
+  try {
+    const res = await api.get<{ listening: boolean }>(
+      '/automation/care-sessions/listen-status',
+      { params: { contactId: contextMenu.contactId, nickId: contextMenu.nickId } },
+    );
+    contextMenu.isFollowing = res.data.listening === true;
+  } catch (err) {
+    console.error('[care-listen] status failed', err);
+  }
+}
+
+async function toggleFollowFromMenu() {
+  if (contextMenu.followBusy || !contextMenu.contactId || !contextMenu.nickId) return;
+  contextMenu.followBusy = true;
+  try {
+    if (contextMenu.isFollowing) {
+      await api.delete('/automation/care-sessions/listen', {
+        data: { contactId: contextMenu.contactId, nickId: contextMenu.nickId },
+      });
+      contextMenu.isFollowing = false;
+    } else {
+      await api.post('/automation/care-sessions/listen', {
+        contactId: contextMenu.contactId, nickId: contextMenu.nickId,
+      });
+      contextMenu.isFollowing = true;
+    }
+  } catch (err) {
+    console.error('[care-listen] toggle failed', err);
+    window.alert('Lỗi cập nhật theo dõi — thử lại sau');
+  } finally {
+    contextMenu.followBusy = false;
+  }
+}
+
+// ── Xóa đoạn hội thoại (xóa mềm) ─────────────────────────────────────────────
+function askDeleteConversation() {
+  // mở hộp xác nhận; convId đã có trong contextMenu
+  deleteDialog.convId = contextMenu.convId;
+  deleteDialog.busy = false;
+  deleteDialog.show = true;
+  contextMenu.show = false;
+  nextTick(() => delConfirmBtn.value?.focus());
+}
+function closeDeleteDialog() {
+  deleteDialog.show = false;
+  deleteDialog.convId = '';
+  deleteDialog.busy = false;
+}
+async function confirmDeleteConversation() {
+  if (deleteDialog.busy || !deleteDialog.convId) return;
+  deleteDialog.busy = true;
+  const convId = deleteDialog.convId;
+  try {
+    await api.delete(`/conversations/${convId}`);
+    emit('conversation-deleted', convId);
+    closeDeleteDialog();
+  } catch (err) {
+    console.error('Failed to delete conversation:', err);
+    window.alert('Lỗi xóa hội thoại — thử lại sau');
+    deleteDialog.busy = false;
   }
 }
 
@@ -794,26 +917,28 @@ function parseSentiment(conv: Conversation): AiSentiment | null {
 }
 
 // Time format theo spec user (tăng độ rộng tên conv):
-//   < 1 phút     → "Vừa xong"
+//   < 1 phút     → "Now"   (2026-06-11 đổi từ "Vừa xong")
 //   < 60 phút    → "Xp"   (vd "5p")
 //   < 24h        → "HH:mm"
 //   = 1 ngày     → "Hôm qua"
 //   < 7 ngày     → "Xd"   (vd "3d")
 //   ≥ 7 ngày cùng năm → "DD/MM" (vd "12/05") — không hiện năm
 //   năm cũ (≠ năm nay) → "MM/YYYY" (vd "11/2025") — không hiện ngày
-function formatTime(dateStr: string | null): string {
+// _tick: timestamp reactive (từ `now` ref) — chỉ dùng để tạo dependency cho Vue
+// re-render mỗi 30s. KHÔNG bỏ tham số này, nếu không thời gian sẽ đứng yên.
+function formatTime(dateStr: string | null, _tick: number = now.value): string {
   if (!dateStr) return '';
   const date = new Date(dateStr);
-  const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
+  const nowDate = new Date(_tick);
+  const diffMs = nowDate.getTime() - date.getTime();
   const diffMins = Math.floor(diffMs / 60000);
-  if (diffMins < 1) return 'Vừa xong';
+  if (diffMins < 1) return 'Now';
   if (diffMins < 60) return `${diffMins}p`;
   const diffHours = Math.floor(diffMins / 60);
   // 2026-05-21 Phase B-5: hour/date/year đọc theo org TZ thay vì browser local.
   // diffMs/diffMins/diffHours/diffDays là delta UTC → TZ-agnostic, OK giữ nguyên.
   const p = getOrgParts(date);
-  const nowP = getOrgParts(now);
+  const nowP = getOrgParts(nowDate);
   if (!p || !nowP) return '';
   if (diffHours < 24) {
     return `${String(p.hour).padStart(2, '0')}:${String(p.minute).padStart(2, '0')}`;
@@ -1439,6 +1564,94 @@ function onPatternLeave() {
 
 <!-- Unscoped style cho teleport tooltip (đặt body, không reach được scoped CSS) -->
 <style>
+/* Hộp xác nhận Xóa hội thoại — Teleport ra body nên CSS phải unscoped. */
+.del-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(15, 23, 42, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: del-fade 0.12s ease-out;
+}
+@keyframes del-fade { from { opacity: 0; } to { opacity: 1; } }
+.del-card {
+  width: 340px;
+  max-width: calc(100vw - 32px);
+  background: #fff;
+  border-radius: 14px;
+  padding: 22px 22px 16px;
+  box-shadow: 0 18px 48px rgba(15, 23, 42, 0.28);
+  text-align: center;
+  font-family: inherit;
+  animation: del-pop 0.14s ease-out;
+}
+@keyframes del-pop {
+  from { opacity: 0; transform: translateY(6px) scale(0.97); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+.del-icon {
+  width: 52px; height: 52px;
+  margin: 0 auto 12px;
+  border-radius: 50%;
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+  display: flex; align-items: center; justify-content: center;
+}
+.del-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #111827;
+  margin-bottom: 6px;
+}
+.del-desc {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: #6b7280;
+  margin-bottom: 18px;
+}
+.del-actions {
+  display: flex;
+  gap: 10px;
+}
+.del-btn {
+  flex: 1;
+  height: 38px;
+  border-radius: 9px;
+  border: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: background-color 0.12s ease, opacity 0.12s ease;
+}
+.del-btn--ghost {
+  background: #f3f4f6;
+  color: #374151;
+}
+.del-btn--ghost:hover { background: #e5e7eb; }
+.del-btn--danger {
+  background: #ef4444;
+  color: #fff;
+}
+.del-btn--danger:hover { background: #dc2626; }
+.del-btn--danger:disabled { opacity: 0.6; cursor: default; }
+.del-btn:focus-visible { outline: 2px solid #2962ff; outline-offset: 2px; }
+.del-hint {
+  margin-top: 12px;
+  font-size: 11px;
+  color: #9ca3af;
+}
+.del-hint kbd {
+  background: #f3f4f6;
+  border: 1px solid #e5e7eb;
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10.5px;
+  font-family: inherit;
+}
+
 .engagement-pattern-tip-portal {
   position: fixed;
   background: #1F2D3D;

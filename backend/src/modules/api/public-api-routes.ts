@@ -148,7 +148,7 @@ export async function publicApiRoutes(app: FastifyInstance): Promise<void> {
       const { limit = '20' } = request.query as Record<string, string>;
 
       const conversations = await prisma.conversation.findMany({
-        where: { orgId },
+        where: { orgId, deletedAt: null },
         select: {
           id: true, threadType: true, externalThreadId: true,
           lastMessageAt: true, unreadCount: true, isReplied: true,

@@ -53,7 +53,7 @@ export async function contactSubResourceRoutes(app: FastifyInstance): Promise<vo
 
       // Last conversation for "Nhắn tin" deep-link
       const lastConv = await prisma.conversation.findFirst({
-        where: { contactId: contact.id, orgId: user.orgId },
+        where: { contactId: contact.id, orgId: user.orgId, deletedAt: null },
         orderBy: { lastMessageAt: 'desc' },
         select: { id: true, zaloAccountId: true },
       });

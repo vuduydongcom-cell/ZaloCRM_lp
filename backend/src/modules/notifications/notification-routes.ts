@@ -40,7 +40,7 @@ export async function notificationRoutes(app: FastifyInstance) {
     // 1. Unreplied conversations > 30 min
     const thirtyMinAgo = new Date(Date.now() - 30 * 60000);
     const unreplied = await prisma.conversation.count({
-      where: { orgId: user.orgId, ...convScope, isReplied: false, lastMessageAt: { lt: thirtyMinAgo } },
+      where: { orgId: user.orgId, ...convScope, deletedAt: null, isReplied: false, lastMessageAt: { lt: thirtyMinAgo } },
     });
     if (unreplied > 0) {
       notifications.push({

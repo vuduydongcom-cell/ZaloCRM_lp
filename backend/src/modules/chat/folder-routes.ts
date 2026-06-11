@@ -25,6 +25,16 @@ export async function folderRoutes(app: FastifyInstance): Promise<void> {
   app.get('/api/v1/account-folders', async (request: FastifyRequest, reply: FastifyReply) => {
     try {
       const user = request.user!;
+      // 2026-06-11 — số đếm folder cột 1 lọc theo CÙNG key tab đang chọn (Cá nhân/
+      // Nhóm/Chính/Ưu tiên) để các bộ lọc link với nhau (anh chốt). Cá nhân/Nhóm
+      // (threadType) loại trừ hội thoại đã chuyển Ưu tiên (mặc định tab=main).
+      const { threadType = '', tab = '' } = request.query as { threadType?: string; tab?: string };
+      const tabCountWhere: Record<string, unknown> = {};
+      if (tab) tabCountWhere.tab = tab;
+      if (threadType === 'user' || threadType === 'group') {
+        tabCountWhere.threadType = threadType;
+        if (!tab) tabCountWhere.tab = 'main';
+      }
       const folders = await prisma.accountFolder.findMany({
         where: { userId: user.id, orgId: user.orgId },
         orderBy: [{ sortOrder: 'asc' }, { createdAt: 'asc' }],
@@ -55,17 +65,19 @@ export async function folderRoutes(app: FastifyInstance): Promise<void> {
           counts[f.id] = { unread: 0, total: 0 };
           continue;
         }
-        // Lấy aggregate cho tất cả account trong folder
+        // Lấy aggregate cho tất cả account trong folder (lọc theo tab + bỏ đã xóa mềm)
         const [unreadCount, totalCount] = await Promise.all([
           prisma.conversation.count({
             where: {
               orgId: user.orgId,
               zaloAccountId: { in: accountIds },
+              deletedAt: null,
+              ...tabCountWhere,
               unreadCount: { gt: 0 },
             },
           }),
           prisma.conversation.count({
-            where: { orgId: user.orgId, zaloAccountId: { in: accountIds } },
+            where: { orgId: user.orgId, zaloAccountId: { in: accountIds }, deletedAt: null, ...tabCountWhere },
           }),
         ]);
         counts[f.id] = { unread: unreadCount, total: totalCount };

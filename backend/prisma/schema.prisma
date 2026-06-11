@@ -702,6 +702,9 @@ model Conversation {
   // Zalo SDK send, lưu thẳng Message isLocal=true. externalThreadId synthetic 'virtual:{contactId}:{nickId}'.
   // Memory M53: anh chốt Approach A — sale có 1 chỗ duy nhất xem TẤT CẢ KH trong /chat.
   isVirtual         Boolean   @default(false) @map("is_virtual")
+  // 2026-06-11 — Xóa mềm hội thoại từ cột 2 (anh chốt: ẩn đi, khôi phục được).
+  // Khi != null → mọi query list/count loại trừ. KHÔNG xóa Message vật lý.
+  deletedAt         DateTime? @map("deleted_at")
   createdAt         DateTime  @default(now()) @map("created_at")
 
   org           Organization         @relation(fields: [orgId], references: [id], onDelete: Cascade)
@@ -715,6 +718,7 @@ model Conversation {
   @@index([orgId, zaloAccountId, isReplied, lastMessageAt])
   @@index([orgId, zaloAccountId, lastMessageAt])
   @@index([orgId, tab, lastMessageAt])
+  @@index([orgId, deletedAt])
   // M-tier tab-switch fix (2026-05-21): index riêng cho tab Cá Nhân/Nhóm
   // (filter theo threadType + accountId, sort lastMessageAt desc).
   // Trước fix: planner seq-scan + filter post-index → 1-3s lag chuyển tab.
