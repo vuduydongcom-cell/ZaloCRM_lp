@@ -37,9 +37,21 @@ function normalizeLogoUrl(raw: unknown): BrandingResult {
   const t = raw.trim();
   if (t.length === 0) return { value: null };
   if (t.length > 2048) return { error: 'Đường dẫn logo quá dài' };
-  const ok = t.startsWith('/') || t.startsWith('https://');
-  if (!ok) return { error: 'Logo phải là đường dẫn nội bộ (/...) hoặc https://' };
-  return { value: t };
+  if (t.startsWith('/')) return { value: t }; // path nội bộ (asset tĩnh /brand/...)
+
+  let u: URL;
+  try { u = new URL(t); } catch { return { error: 'Logo phải là đường dẫn nội bộ (/...) hoặc URL hợp lệ' }; }
+  if (u.protocol === 'https:') return { value: t };
+  // http:// chỉ chấp nhận từ máy chủ media nội bộ (MinIO S3_PUBLIC_URL hoặc
+  // localhost khi chạy local) — vẫn chặn http ngoài để tránh mixed-content/pixel.
+  if (u.protocol === 'http:') {
+    const s3 = (process.env.S3_PUBLIC_URL ?? '').trim().replace(/\/+$/, '');
+    const isStore = s3.length > 0 && t.startsWith(s3 + '/');
+    const isLocal = u.hostname === 'localhost' || u.hostname === '127.0.0.1';
+    if (isStore || isLocal) return { value: t };
+    return { error: 'Logo http:// chỉ chấp nhận từ máy chủ media nội bộ' };
+  }
+  return { error: 'Giao thức logo không hỗ trợ' };
 }
 
 function normalizeEmailDomain(raw: unknown): BrandingResult {

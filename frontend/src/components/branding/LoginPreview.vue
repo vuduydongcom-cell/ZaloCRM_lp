@@ -58,10 +58,13 @@ defineProps<{
 </script>
 
 <style scoped>
-/* Preview để KÍCH THƯỚC THẬT 880×460 (anh chốt 2026-06-12), không scale. */
+/* Preview để KÍCH THƯỚC THẬT 880×460 (anh chốt 2026-06-12), không scale.
+   max-width: none để THẮNG rule global hs-crm-theme.css (.login-card{max-width:384px})
+   — theme login cũ rò vào class trùng tên, làm preview bị bóp ~384px. */
 .login-card {
   display: flex;
   width: 880px;
+  max-width: none;
   height: 460px;
   pointer-events: none;  /* preview tĩnh, không click được */
   background: #fff;

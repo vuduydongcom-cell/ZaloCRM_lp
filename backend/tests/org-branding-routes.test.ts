@@ -166,11 +166,26 @@ describe('PUT /api/v1/organization (branding)', () => {
     expect(prismaMock.organization.update).not.toHaveBeenCalled();
   });
 
-  it('validation — logoUrl http:// (mixed-content) → 400', async () => {
+  it('validation — logoUrl http:// ngoài (mixed-content) → 400', async () => {
     const res = await buildApp().inject({
       method: 'PUT', url: PUT, payload: { logoUrl: 'http://evil.com/pixel.png' },
     });
     expect(res.statusCode).toBe(400);
+  });
+
+  it('validation — logoUrl http://localhost (kho media nội bộ) → OK', async () => {
+    prismaMock.organization.update.mockResolvedValue({
+      id: 'org-1', name: 'HS', timezone: '+07:00',
+      logoUrl: 'http://localhost:9100/zalocrm-attachments/media/x.webp',
+      slogan: null, copyright: null, emailDomain: null,
+    });
+    const res = await buildApp().inject({
+      method: 'PUT', url: PUT,
+      payload: { logoUrl: 'http://localhost:9100/zalocrm-attachments/media/x.webp' },
+    });
+    expect(res.statusCode).toBe(200);
+    expect(prismaMock.organization.update.mock.calls[0][0].data.logoUrl)
+      .toBe('http://localhost:9100/zalocrm-attachments/media/x.webp');
   });
 
   it('chuỗi rỗng → xóa (null)', async () => {
