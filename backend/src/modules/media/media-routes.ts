@@ -673,6 +673,53 @@ export async function mediaRoutes(app: FastifyInstance) {
     },
   );
 
+  // ── PATCH /api/v1/media/bulk — gán folder / tag HÀNG LOẠT (GĐ12 multi-select) ─
+  // Chỉ áp cho asset active CỦA MÌNH (hoặc view_all). KHÔNG đổi visibility ở bulk (tránh
+  // vô tình chia sẻ ảnh nick Riêng tư — privacy; đổi visibility vẫn qua PATCH /:id đơn lẻ
+  // có cổng confirmShare D11). folderId=null = bỏ khỏi thư mục.
+  app.patch(
+    '/api/v1/media/bulk',
+    { preHandler: requireGrant('media', 'edit') },
+    async (request: FastifyRequest, reply: FastifyReply) => {
+      const user = request.user!;
+      const userId = (user as any).userId ?? user.id;
+      const body = request.body as { ids: string[]; folderId?: string | null; addTags?: string[] };
+      if (!Array.isArray(body?.ids) || body.ids.length === 0) {
+        return reply.status(400).send({ error: 'Thiếu danh sách ảnh (ids)' });
+      }
+      if (body.ids.length > 200) return reply.status(400).send({ error: 'Tối đa 200 mục/lần' });
+      const canViewAll = await userHasGrant(userId, 'media', 'view_all');
+
+      // Chỉ lấy asset active thuộc phạm vi cho phép → chống sửa của người khác / đồ đã xóa.
+      const scoped = await prisma.mediaAsset.findMany({
+        where: {
+          id: { in: body.ids }, orgId: user.orgId, archivedAt: null,
+          ...(canViewAll ? {} : { ownerUserId: userId }),
+        },
+        select: { id: true, tagIds: true },
+      });
+      if (scoped.length === 0) return reply.status(404).send({ error: 'Không có mục hợp lệ để cập nhật' });
+
+      // Gán folder: 1 update chung cho tất cả (cùng giá trị).
+      if (body.folderId !== undefined) {
+        await prisma.mediaAsset.updateMany({
+          where: { id: { in: scoped.map((a) => a.id) } },
+          data: { folderId: body.folderId },
+        });
+      }
+      // Gán thêm tag: hợp nhất tag mới vào tag cũ per-asset (không ghi đè tag đang có).
+      if (body.addTags && body.addTags.length) {
+        const clean = body.addTags.map((t) => t.trim()).filter(Boolean);
+        for (const a of scoped) {
+          const merged = Array.from(new Set([...(a.tagIds ?? []), ...clean]));
+          await prisma.mediaAsset.update({ where: { id: a.id }, data: { tagIds: merged } });
+        }
+      }
+      logger.info(`[media][audit] bulk_update user=${userId} count=${scoped.length} folder=${body.folderId !== undefined} tags=${body.addTags?.length ?? 0}`);
+      return { ok: true, updated: scoped.length };
+    },
+  );
+
   // ── DELETE /api/v1/media/:id — vào THÙNG RÁC (xóa MỀM, giữ object MinIO) ────
   // GĐ13a (2026-06-12): archivedAt = dấu thùng rác. grant 'edit' đủ (sale xóa ảnh CỦA MÌNH).
   // Xóa của người khác cần view_all (admin). Ghi trashedById để audit + scope khôi phục.

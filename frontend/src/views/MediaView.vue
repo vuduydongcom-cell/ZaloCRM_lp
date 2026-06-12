@@ -9,6 +9,9 @@
           <input v-model="search" placeholder="Tìm ảnh, tag dự án…" @input="debouncedReload" />
         </div>
         <button class="btn-dark" @click="triggerUpload">+ Tải lên</button>
+        <button v-if="!trashMode" class="btn-multi" :class="{ on: multiMode }" :title="multiMode ? 'Tắt chọn nhiều' : 'Chọn nhiều ảnh'" @click="toggleMultiMode">
+          <CheckSquareIcon :size="15" :stroke-width="1.9" /> Chọn nhiều
+        </button>
         <button class="btn-trash" :class="{ on: trashMode }" :title="trashMode ? 'Đóng thùng rác' : 'Mở thùng rác'" @click="trashMode ? closeTrash() : openTrash()">
           <Trash2Icon :size="15" :stroke-width="1.9" /> Thùng rác
         </button>
@@ -104,6 +107,19 @@
 
       <!-- Grid / empty / loading -->
       <div class="m-grid-wrap">
+        <!-- GĐ12: thanh thao tác hàng loạt (hiện khi chọn nhiều + có ảnh chọn) -->
+        <div v-if="multiMode && picked.size > 0" class="bulk-bar">
+          <span class="bulk-cnt">Đã chọn {{ picked.size }}</span>
+          <select v-model="bulkFolderId" class="bulk-sel" @change="onBulkFolder">
+            <option value="__none">Gán thư mục…</option>
+            <option value="">— Bỏ khỏi thư mục —</option>
+            <option v-for="f in folders" :key="f.id" :value="f.id">{{ f.name }}</option>
+          </select>
+          <input v-model="bulkTag" class="bulk-tag" placeholder="Gán tag rồi Enter" @keyup.enter="onBulkTag" />
+          <button class="bulk-trash" @click="onBulkTrash"><Trash2Icon :size="13" :stroke-width="1.9" /> Xóa {{ picked.size }} mục</button>
+          <button class="bulk-clear" @click="clearPicked">Bỏ chọn</button>
+        </div>
+
         <!-- Dải "Hay dùng nhất" (GĐ4 đo hiệu quả) -->
         <div v-if="!loading && stats && stats.topUsed.length" class="m-stats">
           <div class="ms-head">
@@ -144,13 +160,14 @@
 
         <!-- ẢNH/VIDEO: grid thẻ thumbnail -->
         <div v-else class="m-grid">
-          <div v-for="a in items" :key="a.id" class="card" :class="{ sel: selected?.id === a.id }" @click="select(a)">
+          <div v-for="a in items" :key="a.id" class="card" :class="{ sel: selected?.id === a.id, picked: picked.has(a.id) }" @click="onCardClick(a)">
             <div class="thumb">
               <img v-if="a.thumbnailUrl" :src="a.thumbnailUrl" loading="lazy" alt="" />
               <span v-else class="ph">{{ a.kind === 'video' ? '🎬' : a.kind === 'file' ? '📄' : '🖼' }}</span>
               <span v-if="a.kind === 'video'" class="play-ic">▶</span>
               <span v-if="a.kind === 'video' && a.durationSec" class="dur">{{ fmtDuration(a.durationSec) }}</span>
               <span v-if="a.visibility === 'private'" class="badge">🔒</span>
+              <span v-if="multiMode" class="pick-tick" :class="{ on: picked.has(a.id) }">{{ picked.has(a.id) ? '✓' : '' }}</span>
             </div>
             <div class="meta">
               <div class="fn" :title="a.name">{{ a.name }}</div>
@@ -180,11 +197,12 @@ import { ref, computed, onMounted } from 'vue';
 import {
   listMedia, uploadMedia, listMediaFolders, createMediaFolder, mediaStats,
   listTrash, restoreMedia, permanentDeleteMedia, emptyTrash,
+  archiveMedia, bulkUpdateMedia,
   type MediaAssetItem, type MediaFolder, type TrashItem,
 } from '@/api/media';
 import { useToast } from '@/composables/use-toast';
 import MediaDetailPanel from '@/components/media/MediaDetailPanel.vue';
-import { Trash2 as Trash2Icon, RotateCcw as RotateCcwIcon, X as XIcon } from 'lucide-vue-next';
+import { Trash2 as Trash2Icon, RotateCcw as RotateCcwIcon, X as XIcon, CheckSquare as CheckSquareIcon } from 'lucide-vue-next';
 
 const toast = useToast();
 
@@ -266,6 +284,57 @@ function setVis(v: any) { visFilter.value = v; reload(); }
 function setFolder(id: string | null) { activeFolder.value = id; reload(); }
 function toggleTag(tag: string) { activeTags.value = activeTags.value.filter((t) => t !== tag); reload(); }
 function select(a: MediaAssetItem) { selected.value = a; }
+
+// ── GĐ12: Chọn nhiều + thao tác hàng loạt ───────────────────────────────────
+const multiMode = ref(false);
+const picked = ref<Set<string>>(new Set());
+const bulkFolderId = ref('__none');
+const bulkTag = ref('');
+
+function toggleMultiMode() {
+  multiMode.value = !multiMode.value;
+  if (!multiMode.value) clearPicked();
+  else selected.value = null; // tắt panel chi tiết khi vào chế độ chọn nhiều
+}
+function clearPicked() { picked.value = new Set(); }
+function onCardClick(a: MediaAssetItem) {
+  if (!multiMode.value) { select(a); return; }
+  const next = new Set(picked.value);
+  if (next.has(a.id)) next.delete(a.id); else next.add(a.id);
+  picked.value = next;
+}
+async function onBulkFolder() {
+  const v = bulkFolderId.value;
+  if (v === '__none' || picked.value.size === 0) return;
+  try {
+    const folderId = v === '' ? null : v;
+    const res = await bulkUpdateMedia([...picked.value], { folderId });
+    toast.success(`Đã gán thư mục cho ${res.updated} mục`);
+    bulkFolderId.value = '__none';
+    clearPicked(); reload();
+  } catch (e: any) { toast.warning(e?.response?.data?.error || 'Gán thư mục thất bại'); }
+}
+async function onBulkTag() {
+  const t = bulkTag.value.trim();
+  if (!t || picked.value.size === 0) return;
+  try {
+    const res = await bulkUpdateMedia([...picked.value], { addTags: [t] });
+    toast.success(`Đã gán tag "${t}" cho ${res.updated} mục`);
+    bulkTag.value = ''; reload();
+  } catch (e: any) { toast.warning(e?.response?.data?.error || 'Gán tag thất bại'); }
+}
+async function onBulkTrash() {
+  const ids = [...picked.value];
+  if (ids.length === 0) return;
+  if (!window.confirm(`Chuyển ${ids.length} mục vào Thùng rác?\n(Khôi phục được trong 30 ngày. Lịch sử chat đã gửi không bị ảnh hưởng.)`)) return;
+  try {
+    // Tái dùng archiveMedia (DELETE /media/:id = vào thùng rác) — chạy tuần tự cho an toàn.
+    let ok = 0;
+    for (const id of ids) { try { await archiveMedia(id); ok++; } catch { /* skip lỗi lẻ */ } }
+    toast.success(`Đã chuyển ${ok}/${ids.length} mục vào Thùng rác`);
+    clearPicked(); reload();
+  } catch (e: any) { toast.warning(e?.response?.data?.error || 'Xóa hàng loạt thất bại'); }
+}
 
 // Định dạng thời lượng video: 95s → "1:35".
 function fmtDuration(sec: number): string {
@@ -429,7 +498,11 @@ onMounted(() => { reload(); loadFolders(); loadStats(); });
 .f.on { background:var(--soft); color:var(--ink); font-weight:500; }
 .f .lk { margin-left:auto; font-size:11px; }
 .m-grid-wrap { flex:1; padding:16px 24px; overflow:auto; min-width:0; }
-.m-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(170px, 1fr)); gap:14px; }
+/* GĐ12a (HD-first 1366): cell co theo cỡ màn. 1366 ô nhỏ (sale màn nhỏ thấy nhiều ảnh
+   hơn, đỡ cuộn) → 1920 vừa → 2560 ô to thoáng. minmax auto-fill giữ lưới không vỡ. */
+.m-grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(140px, 1fr)); gap:12px; }
+@media (min-width:1600px) { .m-grid { grid-template-columns:repeat(auto-fill, minmax(170px, 1fr)); gap:14px; } }
+@media (min-width:2200px) { .m-grid { grid-template-columns:repeat(auto-fill, minmax(200px, 1fr)); gap:16px; } }
 /* TỆP — list detail theo dòng (anh chốt: grid card không phân biệt được tệp nào). */
 .m-flist { display:flex; flex-direction:column; border:1px solid var(--hairline); border-radius:var(--r-md); overflow:hidden; background:var(--canvas); }
 .frow { display:flex; align-items:center; gap:13px; padding:11px 14px; border-bottom:1px solid var(--hairline); cursor:pointer; }
@@ -487,4 +560,19 @@ onMounted(() => { reload(); loadFolders(); loadStats(); });
 .t-restore:hover { background:#1786be; color:#fff; border-color:#1786be; }
 .t-perm { background:#fff; color:#c0392b; border:1px solid #f0c8c2; border-radius:var(--r-sm); padding:5px 9px; cursor:pointer; display:inline-flex; align-items:center; }
 .t-perm:hover { background:#c0392b; color:#fff; border-color:#c0392b; }
+
+/* ── GĐ12: Chọn nhiều + thao tác hàng loạt ── */
+.btn-multi { display:inline-flex; align-items:center; gap:6px; background:#fff; color:var(--muted); border:1px solid var(--hairline); border-radius:var(--r-md); padding:7px 13px; font-size:13px; font-weight:500; cursor:pointer; }
+.btn-multi:hover { border-color:#1786be; color:#1786be; }
+.btn-multi.on { background:#1786be; border-color:#1786be; color:#fff; }
+.pick-tick { position:absolute; top:6px; left:6px; width:22px; height:22px; border-radius:6px; border:2px solid #fff; background:rgba(20,26,36,.35); color:#fff; font-size:13px; font-weight:800; display:flex; align-items:center; justify-content:center; box-shadow:0 1px 3px rgba(0,0,0,.25); }
+.pick-tick.on { background:#1786be; }
+.card.picked { border-color:#1786be; box-shadow:0 0 0 2px #d4ecf7; }
+.bulk-bar { display:flex; align-items:center; gap:10px; background:#e4f1f8; border:1px solid #b9ddf0; border-radius:var(--r-md); padding:9px 13px; margin-bottom:14px; }
+.bulk-cnt { font-size:13px; font-weight:700; color:#0b5880; flex-shrink:0; }
+.bulk-sel, .bulk-tag { border:1px solid #b9ddf0; border-radius:var(--r-sm); padding:6px 10px; font-size:12.5px; background:#fff; color:var(--ink); outline:none; }
+.bulk-tag { width:150px; }
+.bulk-trash { display:inline-flex; align-items:center; gap:5px; background:#fff; border:1px solid #f0c8c2; color:#c0392b; border-radius:var(--r-sm); padding:6px 11px; font-size:12.5px; font-weight:600; cursor:pointer; }
+.bulk-trash:hover { background:#c0392b; color:#fff; border-color:#c0392b; }
+.bulk-clear { margin-left:auto; background:none; border:none; color:#0b5880; font-size:12.5px; font-weight:600; cursor:pointer; }
 </style>

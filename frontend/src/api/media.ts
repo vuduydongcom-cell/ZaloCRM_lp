@@ -145,6 +145,15 @@ export async function emptyTrash(): Promise<{ ok: boolean; deleted: number; hasM
   return data;
 }
 
+/** GĐ12: gán folder / thêm tag HÀNG LOẠT cho nhiều ảnh (multi-select trên /media). */
+export async function bulkUpdateMedia(
+  ids: string[],
+  patch: { folderId?: string | null; addTags?: string[] },
+): Promise<{ ok: boolean; updated: number }> {
+  const { data } = await api.patch('/media/bulk', { ids, ...patch });
+  return data;
+}
+
 /** Đóng dấu logo HS lên 1 ảnh (BẬT watermark per-ảnh + chọn góc/độ mờ). */
 export async function watermarkMedia(
   id: string,
