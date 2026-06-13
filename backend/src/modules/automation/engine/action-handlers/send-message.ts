@@ -9,7 +9,8 @@
 //   4. Idempotent: gửi ít nhất 1 tin OK → success (retry không nên double-send — xem note)
 //   5. Apply Contact + Friend aggregates (1 lần, theo tin cuối) cho /contacts dashboard
 //
-// Set AUTOMATION_STUB_MODE=true để test không chạm Zalo.
+// 2026-06-13 (Sequence recode Đợt 1): GỬI BẤT CHẤP bạn/lạ — thiếu Friend row → ensureUidForPair
+// (resolve UID qua SĐT). KH bật chặn tin lạ → set strangerBlocked + dừng riêng. Bỏ STUB_MODE.
 
 import { randomUUID } from 'node:crypto';
 import { prisma } from '../../../../shared/database/prisma-client.js';

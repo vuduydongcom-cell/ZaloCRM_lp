@@ -113,29 +113,35 @@ function deriveFollowupState(input: {
 }
 
 /**
- * Scan BullMQ sequence-step queue 1 lần, trả map jobId-prefix → {stepIdx, nextRunAt}.
- * prefixKeys = các chuỗi `${triggerId}-${contactId}-` cần khớp.
- * Trả Map key = prefix (không có stepIdx), value = job sớm nhất.
+ * Scan BullMQ sequence-step queue 1 lần, trả map key → {stepIdx, nextRunAt, sequenceId}.
+ *
+ * 2026-06-13: jobId đổi sang `${triggerId}-${sequenceId}-${contactId}-${stepIdx}` (đa-luồng).
+ * Hàm nhận (triggerId, contactIds) → match jobId theo regex, gom theo contactId. 1 KH có
+ * thể nhiều luồng → giữ job SỚM NHẤT (bước kế gần nhất) cho cột hiển thị tổng. (ETA
+ * per-luồng đầy đủ là Đợt 2 — xem TODO-CON-SOT.) Key = contactId.
  */
 async function scanPendingSequenceJobs(
-  prefixKeys: string[],
-): Promise<Map<string, { stepIdx: number; nextRunAt: Date }>> {
-  const out = new Map<string, { stepIdx: number; nextRunAt: Date }>();
-  if (prefixKeys.length === 0) return out;
+  triggerId: string,
+  contactIds: string[],
+): Promise<Map<string, { stepIdx: number; nextRunAt: Date; sequenceId: string }>> {
+  const out = new Map<string, { stepIdx: number; nextRunAt: Date; sequenceId: string }>();
+  if (contactIds.length === 0) return out;
   const now = Date.now();
+  const wanted = new Set(contactIds);
   try {
     const queue = getSequenceStepQueue();
     const jobs = await queue.getJobs(['delayed', 'waiting', 'active'], 0, 5000);
     for (const job of jobs) {
-      if (!job.id) continue;
-      for (const prefix of prefixKeys) {
-        if (!job.id.startsWith(prefix)) continue;
-        const stepIdx = parseInt(job.id.slice(prefix.length), 10);
-        if (!Number.isFinite(stepIdx)) break;
-        const nextRunAt = new Date((job.timestamp ?? now) + (job.opts?.delay ?? 0));
-        const cur = out.get(prefix);
-        if (!cur || nextRunAt < cur.nextRunAt) out.set(prefix, { stepIdx, nextRunAt });
-        break;
+      if (!job.id || !job.id.startsWith(`${triggerId}-`)) continue;
+      // jobId = trigger-sequence-contact-step. trigger/sequence/contact là uuid (có dấu '-')
+      // → KHÔNG split mù. Dùng job.data (đáng tin) thay vì parse jobId.
+      const d = job.data as { contactId?: string; sequenceId?: string; stepIdx?: number };
+      if (!d?.contactId || !wanted.has(d.contactId)) continue;
+      const stepIdx = typeof d.stepIdx === 'number' ? d.stepIdx : 0;
+      const nextRunAt = new Date((job.timestamp ?? now) + (job.opts?.delay ?? 0));
+      const cur = out.get(d.contactId);
+      if (!cur || nextRunAt < cur.nextRunAt) {
+        out.set(d.contactId, { stepIdx, nextRunAt, sequenceId: d.sequenceId ?? '' });
       }
     }
   } catch (err) {
@@ -248,12 +254,12 @@ async function buildManualFollowupContacts(
   const enrollerName = new Map(enrollers.map((u) => [u.id, u.fullName]));
   const nickName = new Map(nicks.map((n) => [n.id, n.displayName]));
 
-  // Scan BullMQ 1 lần cho tất cả contact.
-  const pendingByPrefix = await scanPendingSequenceJobs(contactIds.map((cid) => `${triggerId}-${cid}-`));
+  // Scan BullMQ 1 lần cho tất cả contact (jobId mới có sequenceId — dùng job.data).
+  const pendingByContact = await scanPendingSequenceJobs(triggerId, contactIds);
 
   const result = await Promise.all(
     [...byContact.values()].map(async (c): Promise<ManualFollowupContact> => {
-      const pending = pendingByPrefix.get(`${triggerId}-${c.contactId}-`);
+      const pending = pendingByContact.get(c.contactId);
       const pauseMs = await getContactPauseRemaining(triggerId, c.contactId);
       const isStopped = c.latestEvent === 'manual_stop' || c.latestEvent === 'customer_block';
       const state = deriveFollowupState({ hasPendingJob: !!pending, pauseMs, isStopped, totalSteps: c.totalSteps });
@@ -427,7 +433,7 @@ export async function registerManualControlRoutes(app: FastifyInstance): Promise
       const [sequence, nick, contact] = await Promise.all([
         prisma.automationSequence.findFirst({
           where: { id: sequenceId, orgId, enabled: true },
-          select: { id: true, name: true, steps: true },
+          select: { id: true, name: true, steps: true, runtimeRules: true },
         }),
         prisma.zaloAccount.findFirst({
           where: { id: nickId, orgId, status: 'connected' },
@@ -452,14 +458,37 @@ export async function registerManualControlRoutes(app: FastifyInstance): Promise
         return { error: 'Khách hàng không tồn tại' };
       }
 
-      // Find/create CustomerListEntry với manual enroll meta
-      // (M9 system trigger không có listId — tạo entry pseudo qua existing customer list
-      //  hoặc default org list. Đơn giản nhất: tạo entry với customerListId=null
-      //  thông qua direct contact reference)
-      //
-      // Đơn giản M9: KHÔNG dùng CustomerListEntry queue path. Trực tiếp enqueue
-      // sequence-step start với nick override.
+      // 2026-06-13 (D4 + SEQ-C1): resolve UID NGAY lúc gắn. KH đang chat với nick này →
+      // UID có sẵn; KH lạ (nick khác) → tìm qua SĐT + tạo Friend row. Fail → báo sale NGAY
+      // (NO_PHONE/NO_ZALO/LOOKUP_CAPPED) thay vì enqueue mù.
+      const { resolveManualNickForContact } = await import('../engine/nick-selector.js');
+      const pick = await resolveManualNickForContact({ orgId, nickId: nick.id, contactId: cid });
+      if (pick.nickId === null) {
+        const msg: Record<string, string> = {
+          NO_PHONE: 'Khách chưa có số điện thoại — không tìm được Zalo để bám đuổi bằng nick này.',
+          NO_ZALO: 'Số điện thoại này không có Zalo / không tìm được. Chọn nick khác hoặc bỏ qua.',
+          LOOKUP_CAPPED: 'Nick đã hết lượt tìm Zalo hôm nay. Thử nick khác hoặc mai.',
+          NOT_CONNECTED: 'Nick Zalo chưa kết nối. Vào Quản lý nick để kết nối lại.',
+        };
+        reply.code(422);
+        return { error: pick.reason, detail: msg[pick.reason] ?? 'Không gửi được tới khách bằng nick này.' };
+      }
 
+      // Luật 3 (chống spam): chặn gắn lại CÙNG luồng trong cooldown. Check TRƯỚC enqueue
+      // (nếu enqueue trước thì cooldown vô nghĩa — job đã vào queue).
+      const { checkReEnrollCooldown } = await import('../care-session/care-session-service.js');
+      const seqRules = (sequence as { runtimeRules?: { reEnrollCooldownDays?: number } }).runtimeRules;
+      const cooldownDays = typeof seqRules?.reEnrollCooldownDays === 'number' ? seqRules.reEnrollCooldownDays : 30;
+      const cool = await checkReEnrollCooldown({ orgId, contactId: cid, sequenceId: sequence.id, cooldownDays });
+      if (cool.blocked) {
+        reply.code(409);
+        return {
+          error: 'reenroll_cooldown',
+          detail: `Khách vừa được gắn luồng này trong ${cooldownDays} ngày qua (lần trước: ${cool.lastOpenedAt?.toLocaleDateString('vi-VN')}). Chờ hết ${cooldownDays} ngày hoặc chọn luồng khác.`,
+        };
+      }
+
+      // Qua cooldown → enqueue step 0 + tạo phiên chăm sóc.
       await enqueueSequenceStart({
         triggerId: systemTrigger.id,
         contactId: cid,
@@ -473,6 +502,7 @@ export async function registerManualControlRoutes(app: FastifyInstance): Promise
       // /marketing/care-sessions, reply của KH tự vào phiên + báo sale. skipEnqueue=true
       // vì đã enqueue STEP 0 ở trên. Phiên lắng nghe tiếp sau khi gửi hết, tự đóng khi
       // KH im lặng N ngày (giống mọi phiên). enrolledByUserId = sale gắn tay.
+      // (enrollFromTrigger TỰ snapshot rulesSnapshot + double-check cooldown — Codex #10.)
       if (nick.ownerUserId) {
         try {
           const { enrollFromTrigger } = await import('../care-session/care-session-service.js');
@@ -609,8 +639,14 @@ export async function registerManualControlRoutes(app: FastifyInstance): Promise
         for (const u of users) enrollerNames.set(u.id, u.fullName);
       }
 
-      // ── 3) Trạng thái THẬT từ BullMQ (helper dùng chung): còn job pending = đang chạy. ──
-      const pendingByPrefix = await scanPendingSequenceJobs(triggerIds.map((tid) => `${tid}-${cid}-`));
+      // ── 3) Trạng thái THẬT từ BullMQ: còn job pending = đang chạy. jobId mới có
+      //       sequenceId → scan per-trigger (1 contact), gom vào map theo triggerId. ──
+      const pendingByTrigger = new Map<string, { stepIdx: number; nextRunAt: Date; sequenceId: string }>();
+      for (const tid of triggerIds) {
+        const m = await scanPendingSequenceJobs(tid, [cid]);
+        const hit = m.get(cid);
+        if (hit) pendingByTrigger.set(tid, hit);
+      }
 
       // ── 4) Derive state per trigger + build cards (chỉ trigger còn sống) ──
       const result = await Promise.all(
@@ -618,7 +654,7 @@ export async function registerManualControlRoutes(app: FastifyInstance): Promise
           .filter((s) => triggerMeta.has(s.triggerId))
           .map(async (s) => {
             const meta = triggerMeta.get(s.triggerId)!;
-            const pending = pendingByPrefix.get(`${s.triggerId}-${cid}-`);
+            const pending = pendingByTrigger.get(s.triggerId);
             const pauseMs = await getContactPauseRemaining(s.triggerId, cid);
             const isStopped = s.latestEvent === 'manual_stop' || s.latestEvent === 'customer_block';
 
