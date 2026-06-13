@@ -29,9 +29,16 @@ import { zaloPool } from '../../../zalo/zalo-pool.js';
 import { buildSendFileName } from '../../../media/media-routes.js';
 import { bumpUsage } from '../../../media/media-service.js';
 
-const STUB_MODE = process.env.AUTOMATION_STUB_MODE === 'true';
-
 type ZaloStyle = { st: string; start: number; len: number };
+
+// 2026-06-13: nhận diện lỗi "KH bật chặn tin người lạ" (anh đính chính — KHÔNG phải
+// Zalo chặn toàn bộ). Quan sát: zalo:127 + message tiếng Việt "không thể nhận tin
+// nhắn từ" / "người lạ". Match cả code lẫn message để không phụ thuộc 1 nguồn.
+function isStrangerRejectError(code: string | undefined, msg: string): boolean {
+  if (code === '127' || code === 'zalo:127') return true;
+  const m = (msg || '').toLowerCase();
+  return m.includes('nhận tin nhắn từ') || m.includes('người lạ') || m.includes('zalo:127');
+}
 
 // 2026-06-13: truy tên file thật từ Kho qua mediaAssetId (block file thường filename trống).
 async function resolveMediaFilename(mediaAssetId: string | undefined, fallback: string | undefined): Promise<string> {
@@ -99,19 +106,10 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
   }
   const messages: ResolvedMessage[] = resolveResult.resolved;
 
-  if (STUB_MODE) {
-    const summary = messages.map((m) => m.messageType).join(' → ');
-    logger.info(`[send-message STUB] would send ${messages.length} tin (${summary}) from nick ${ctx.assignedNickId} to contact ${ctx.contactId}`);
-    return {
-      outcome: 'success',
-      data: { stub: true, messageCount: messages.length, sequence: messages.map((m) => m.messageType) },
-    };
-  }
-
-  // ── Real impl ───────────────────────────────────────────────────────────
+  // ── Real impl (2026-06-13: bỏ STUB_MODE — code chết test, anh chốt recode dứt điểm) ──
 
   // Step 1: find Friend row to get threadId (= zaloUidInNick) and verify status
-  const friend = await prisma.friend.findFirst({
+  let friend = await prisma.friend.findFirst({
     where: {
       zaloAccountId: ctx.assignedNickId,
       contactId: ctx.contactId,
@@ -122,13 +120,40 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
       zaloUidInNick: true,
       friendshipStatus: true,
       hasConversation: true,
+      strangerBlocked: true,
     },
   });
+
+  // 2026-06-13 (Sequence recode Đợt 1 — gửi bất chấp): KHÔNG fail cứng NO_FRIEND_ROW.
+  // Thiếu Friend row (KH lạ) → ensureUidForPair: resolve UID qua SĐT + tạo Friend row,
+  // rồi gửi vào hộp người lạ (allowStrangerMessage). Tái dùng SEQ-C1, không enqueue mù.
   if (!friend) {
+    const { ensureUidForPair } = await import('../ensure-uid.js');
+    const r = await ensureUidForPair({ orgId: ctx.orgId, nickId: ctx.assignedNickId, contactId: ctx.contactId });
+    if (!r.ok) {
+      // Lỗi resolve UID (no_phone/no_zalo/capped/offline) → fail rõ, retry tùy loại.
+      return {
+        outcome: 'failure',
+        errorCode: r.code === 'LOOKUP_CAPPED' || r.code === 'NOT_CONNECTED' ? 'RATE_LIMITED' : 'NO_FRIEND_ROW',
+        errorMessage: r.detail,
+        retryable: r.code === 'LOOKUP_CAPPED' || r.code === 'NOT_CONNECTED',
+      };
+    }
+    friend = await prisma.friend.findFirst({
+      where: { zaloAccountId: ctx.assignedNickId, contactId: ctx.contactId, orgId: ctx.orgId },
+      select: { id: true, zaloUidInNick: true, friendshipStatus: true, hasConversation: true, strangerBlocked: true },
+    });
+    if (!friend) {
+      return { outcome: 'failure', errorCode: 'NO_FRIEND_ROW', errorMessage: 'Friend row vừa tạo không đọc lại được', retryable: true };
+    }
+  }
+
+  // KH đã từng bật chặn tin người lạ → DỪNG riêng cặp này, không thử gửi lại (spam lỗi).
+  if (friend.strangerBlocked) {
     return {
       outcome: 'failure',
-      errorCode: 'NO_FRIEND_ROW',
-      errorMessage: 'No Friend row for (nick, contact) — chat trước khi sequence gửi message',
+      errorCode: 'STRANGER_BLOCKED',
+      errorMessage: 'Khách bật chế độ không nhận tin người lạ — cần kết bạn trước mới bám đuổi được.',
       retryable: false,
     };
   }
@@ -304,6 +329,24 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
       }
       if (code === 'RATE_LIMITED') return { outcome: 'failure', errorCode: 'RATE_LIMITED', errorMessage: msg, retryable: true };
       if (code === 'NOT_CONNECTED') return { outcome: 'failure', errorCode: 'NOT_CONNECTED', errorMessage: msg, retryable: true };
+      // 2026-06-13: KH tự bật "không nhận tin người lạ" (anh đính chính — KHÔNG phải Zalo
+      // chặn toàn bộ). Zalo trả zalo:127 / message chứa "nhận tin nhắn từ" / "người lạ".
+      // → đánh dấu Friend.strangerBlocked + DỪNG riêng cặp này (không spam lỗi lặp).
+      if (isStrangerRejectError(code, msg)) {
+        await prisma.friend
+          .update({
+            where: { zaloAccountId_zaloUidInNick: { zaloAccountId: ctx.assignedNickId, zaloUidInNick: threadId } },
+            data: { strangerBlocked: true, strangerBlockedAt: new Date() },
+          })
+          .catch((e) => logger.warn(`[send-message] set strangerBlocked failed: ${(e as Error).message}`));
+        logger.info(`[send-message] KH bật chặn tin người lạ — dừng sequence riêng contact=${ctx.contactId} nick=${ctx.assignedNickId}`);
+        return {
+          outcome: 'failure',
+          errorCode: 'STRANGER_BLOCKED',
+          errorMessage: 'Khách bật chế độ không nhận tin người lạ — cần kết bạn trước mới bám đuổi được.',
+          retryable: false,
+        };
+      }
       return { outcome: 'failure', errorCode: 'SEND_MESSAGE_FAILED', errorMessage: msg, retryable: false };
     } finally {
       // Dọn temp media (Đường B) — chạy dù gửi OK hay lỗi.
