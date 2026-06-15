@@ -23,7 +23,7 @@ import {
   getContactPauseRemaining,
 } from './event-hooks.js';
 import { enqueueSequenceStart } from './sequence-step-worker.js';
-import { getSequenceStepQueue } from './queue-registry.js';
+import { getSequenceStepQueue, sequenceStepJobPrefix } from './queue-registry.js';
 
 /**
  * Get-or-create system trigger "Bám đuổi khách hàng thủ công" cho 1 org.
@@ -401,6 +401,75 @@ export async function registerManualControlRoutes(app: FastifyInstance): Promise
       });
 
       return { ok: true };
+    },
+  );
+
+  // ── POST advance — "Gửi bước tiếp ngay" (YC3 Đợt 2): đẩy job bước kế về delay 0 ──
+  app.post<{
+    Params: { tid: string; cid: string };
+    Body: { sequenceId?: string };
+  }>(
+    '/api/v1/automation/triggers/:tid/contacts/:cid/advance',
+    { preHandler: authMiddleware },
+    async (request, reply) => {
+      const { tid, cid } = request.params;
+      const orgId = request.user!.orgId;
+      const sequenceId = request.body?.sequenceId;
+
+      // FIX review #1 (HIGH): BẮT BUỘC sequenceId. 1 KH chạy nhiều luồng song song dưới
+      // CÙNG system trigger → thiếu sequenceId sẽ promote MỌI luồng = spam. Mỗi card 1 luồng.
+      if (!sequenceId) {
+        reply.code(400);
+        return { error: 'Thiếu sequenceId — không xác định được luồng nào cần gửi ngay.' };
+      }
+
+      const trigger = await prisma.automationTrigger.findFirst({
+        where: { id: tid, orgId },
+        select: { id: true },
+      });
+      if (!trigger) {
+        reply.code(404);
+        return { error: 'Mục tiêu không tồn tại' };
+      }
+
+      // FIX review #2 (MED): chặn advance khi đang chờ-khách-reply (luật 4) — không gửi đè.
+      const pausedSession = await prisma.careSession.findFirst({
+        where: { orgId, contactId: cid, sourceSequenceId: sequenceId, state: 'active', pausedAtStepIdx: { not: null } },
+        select: { id: true },
+      });
+      if (pausedSession) {
+        reply.code(409);
+        return { error: 'Khách vừa trả lời — luồng đang tạm dừng chờ hết phiên. Không gửi bước tiếp lúc này.' };
+      }
+
+      // Tìm job sequence-step đang delayed CỦA ĐÚNG (trigger, sequence, contact) → chạy ngay.
+      const queue = getSequenceStepQueue();
+      const PAGE = 5000;
+      const jobs = await queue.getJobs(['delayed'], 0, PAGE);
+      if (jobs.length >= PAGE) {
+        logger.warn(`[advance] delayed queue ≥${PAGE} jobs — job mục tiêu có thể ngoài trang (xem TODO scale).`);
+      }
+      const prefix = sequenceStepJobPrefix(tid, sequenceId); // `${tid}-${sequenceId}-`
+      let promoted = 0;
+      for (const job of jobs) {
+        if (!job.id || !job.id.startsWith(prefix)) continue;
+        const d = job.data as { contactId?: string };
+        if (d?.contactId !== cid) continue;
+        try {
+          await job.promote(); // BullMQ v5: delayed → waiting (chạy ngay)
+          promoted++;
+        } catch (err) {
+          logger.warn(`[advance] promote job ${job.id} failed: ${(err as Error).message}`);
+        }
+      }
+
+      if (promoted === 0) {
+        reply.code(409);
+        return { error: 'Không có bước nào đang chờ để gửi ngay (luồng đã xong hoặc đã dừng).' };
+      }
+      // Lưu ý: worker vẫn áp guard giờ/nick lúc chạy — nếu ngoài giờ / nick offline, job
+      // được promote nhưng sẽ tự hoãn lại (không gửi đè). FE đã ẩn nút khi waiting_reply.
+      return { ok: true, promoted };
     },
   );
 

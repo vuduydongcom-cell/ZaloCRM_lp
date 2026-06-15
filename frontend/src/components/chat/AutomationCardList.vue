@@ -149,6 +149,10 @@ interface AutomationStatusCard extends FollowUpCardData {
   latestEvent: string;
   pausedUntil?: string | null;
   stopped?: boolean;
+  // YC3 timing (Đợt 2): BE trả 4 mốc per luồng.
+  etaCompleteAt?: string | null; // bao lâu nữa xong (ISO)
+  holdReason?: 'running' | 'waiting_reply' | 'out_of_hours' | 'nick_offline' | 'completed' | 'stopped' | null;
+  allowedHourRange?: [number, number] | null;
 }
 
 // ── State ──
@@ -271,8 +275,10 @@ async function fetchStatus(): Promise<void> {
       ...c,
       state: deriveState(c),
       busy: false,
-      // BE chưa expose → giữ undefined: UI tự ẩn ETA + disable nút "Gửi bước tiếp ngay".
-      advanceEnabled: false,
+      // Đợt 2: BE đã expose timing. Cho advance khi: có job kế (nextRunAt) + CÓ sequenceId
+      // (BE advance bắt buộc sequenceId — review #1, không fan-out đa-luồng) + không
+      // chờ-khách-reply + chưa dừng.
+      advanceEnabled: !!c.nextRunAt && !!c.sequenceId && c.holdReason !== 'waiting_reply' && !c.stopped,
     }));
     cards.value = groupBySequence(mapped);
   } catch (err) {
@@ -290,9 +296,22 @@ async function onAction(
 ): Promise<void> {
   if (card.busy) return;
 
-  // "Gửi bước tiếp ngay" + "Xem lịch sử": chờ endpoint BE (anh nối BullMQ sau).
+  // "Gửi bước tiếp ngay" (YC3 Đợt 2): gọi endpoint advance thật (BullMQ promote).
   if (kind === 'advance') {
-    window.alert('Tính năng "Gửi bước tiếp ngay" đang phát triển — sẽ có sớm.');
+    if (card.advanceEnabled === false) return;
+    card.busy = true;
+    try {
+      await api.post(
+        `/automation/triggers/${card.triggerId}/contacts/${props.contactId}/advance`,
+        { sequenceId: card.sequenceId ?? undefined },
+      );
+      await fetchStatus();
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      window.alert(msg ?? 'Không gửi được bước tiếp ngay.');
+    } finally {
+      card.busy = false;
+    }
     return;
   }
   if (kind === 'history') {
