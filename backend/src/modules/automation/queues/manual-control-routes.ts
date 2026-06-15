@@ -898,6 +898,60 @@ export async function registerManualControlRoutes(app: FastifyInstance): Promise
           }),
       );
 
+      // ── 5) "NỞ" card manual followup: 1 card/trigger (gom-đè epoch mới nhất) → mỗi LẦN
+      //       GẮN 1 card riêng (anh chốt 2026-06-15: panel chat ẩn mất luồng đã chạy xong).
+      //       Dùng buildManualFollowupContacts (per-enrollment, đã test trang Theo dõi) lọc
+      //       theo contact này. Card tự động (sequence/block thường) GIỮ NGUYÊN.
+      const hasManualCard = result.some((c) => c.systemKind === 'manual_chat_followup');
+      if (hasManualCard) {
+        const manualTrigger = liveTriggers.find((t) => t.systemKind === 'manual_chat_followup');
+        const nonManual = result.filter((c) => c.systemKind !== 'manual_chat_followup');
+        let manualRuns: typeof result = [];
+        if (manualTrigger) {
+          try {
+            const allRuns = await buildManualFollowupContacts(orgId, manualTrigger.id);
+            manualRuns = allRuns
+              .filter((r) => r.contactId === cid)
+              .map((r) => ({
+                // Khóa duy nhất per-run cho FE :key (1 trigger đẻ nhiều run).
+                enrollmentId: r.enrollmentId,
+                enrollSeq: r.enrollSeq,
+                triggerId: manualTrigger.id,
+                triggerName: r.sequenceName ?? manualTrigger.name ?? 'Bám đuổi thủ công',
+                isSystemTrigger: true,
+                systemKind: 'manual_chat_followup' as string | null,
+                sequenceId: null, // KHÔNG để FE groupBySequence gom các run lại với nhau
+                sequenceName: r.sequenceName,
+                // BE đã biết chính xác state per-run (active/completed/stopped) → truyền thẳng
+                // để FE KHÔNG tự derive sai (run cũ progressUnknown totalSteps=null sẽ bị
+                // deriveState nhầm thành 'active'). FE ưu tiên derivedState nếu có.
+                derivedState: r.state,
+                latestEvent: r.state === 'stopped' ? 'manual_stop' : 'manual_enroll',
+                latestAt: new Date(r.lastSentAt ?? r.enrolledAt),
+                currentStep: r.currentStep,
+                totalSteps: r.totalSteps,
+                nextRunAt: r.nextRunAt,
+                pausedUntilMs: 0,
+                pausedUntil: null,
+                // reenrolled/completed → KHÔNG phải "dừng" (tránh nhãn "Đã dừng" gây hiểu nhầm).
+                // Chỉ stopped thật (sale dừng/KH chặn) mới stopped → vào nhóm Lịch sử.
+                stopped: r.state === 'stopped',
+                etaCompleteAt: null,
+                holdReason: (r.state === 'completed' ? 'completed' : null) as string | null,
+                allowedHourRange: null,
+                timing: [] as unknown[],
+                isManual: true,
+                enrolledByName: r.enrolledByName,
+                enrollReason: r.enrollReason,
+              })) as unknown as typeof result;
+          } catch (err) {
+            logger.warn(`[automation-status] nở manual runs lỗi (giữ card gộp): ${(err as Error).message}`);
+            manualRuns = result.filter((c) => c.systemKind === 'manual_chat_followup');
+          }
+        }
+        return { contactId: cid, triggers: [...nonManual, ...manualRuns] };
+      }
+
       return { contactId: cid, triggers: result };
     },
   );

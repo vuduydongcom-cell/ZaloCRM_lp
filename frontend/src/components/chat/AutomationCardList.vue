@@ -77,42 +77,55 @@
         <div class="acl-cards">
           <FollowUpCard
             v-for="card in runningCards"
-            :key="card.triggerId"
+            :key="card.enrollmentId ?? card.triggerId"
             :card="card"
             @action="(k) => onAction(card, k)"
           />
         </div>
       </section>
 
-      <!-- ── Section: Đã hoàn thành ── -->
+      <!-- ── Section: Đã hoàn thành (THU GỌN mặc định — anh chốt 2026-06-15) ──
+           Bấm tiêu đề mới xổ ra danh sách dòng nhỏ. Đang chạy luôn hiện đầy đủ ở trên. -->
       <section v-if="completedCards.length" class="acl-sec">
-        <div class="acl-sec__title">
+        <button class="acl-sec__title acl-sec__title--toggle" @click="showCompleted = !showCompleted">
           <span class="acl-dot done" />Đã hoàn thành
           <span class="acl-cnt">{{ completedCards.length }}</span>
-        </div>
-        <div class="acl-cards">
-          <FollowUpCard
+          <svg class="acl-chev" :class="{ open: showCompleted }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+        </button>
+        <div v-if="showCompleted" class="acl-done-list">
+          <button
             v-for="card in completedCards"
-            :key="card.triggerId"
-            :card="card"
-            @action="(k) => onAction(card, k)"
-          />
+            :key="card.enrollmentId ?? card.triggerId"
+            class="acl-done-row"
+            :title="`${card.sequenceName || 'Luồng bám đuổi'} — Lần ${card.enrollSeq ?? 1}`"
+            @click="onAction(card, 'history')"
+          >
+            <span class="acl-done-name">{{ card.sequenceName || 'Luồng bám đuổi' }}</span>
+            <span v-if="card.enrollSeq" class="acl-done-seq">Lần {{ card.enrollSeq }}</span>
+            <span class="acl-done-when">{{ doneWhen(card) }}</span>
+          </button>
         </div>
       </section>
 
-      <!-- ── Section: Lịch sử bám đuổi (stopped) ── -->
+      <!-- ── Section: Lịch sử bám đuổi (stopped) — cũng thu gọn dòng nhỏ ── -->
       <section v-if="historyCards.length" class="acl-sec">
-        <div class="acl-sec__title">
+        <button class="acl-sec__title acl-sec__title--toggle" @click="showHistory = !showHistory">
           <span class="acl-dot hist" />Lịch sử bám đuổi
           <span class="acl-cnt">{{ historyCards.length }}</span>
-        </div>
-        <div class="acl-cards">
-          <FollowUpCard
+          <svg class="acl-chev" :class="{ open: showHistory }" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9" /></svg>
+        </button>
+        <div v-if="showHistory" class="acl-done-list">
+          <button
             v-for="card in historyCards"
-            :key="card.triggerId"
-            :card="card"
-            @action="(k) => onAction(card, k)"
-          />
+            :key="card.enrollmentId ?? card.triggerId"
+            class="acl-done-row"
+            :title="`${card.sequenceName || 'Luồng bám đuổi'} — Lần ${card.enrollSeq ?? 1}`"
+            @click="onAction(card, 'history')"
+          >
+            <span class="acl-done-name">{{ card.sequenceName || 'Luồng bám đuổi' }}</span>
+            <span v-if="card.enrollSeq" class="acl-done-seq">Lần {{ card.enrollSeq }}</span>
+            <span class="acl-done-when">{{ doneWhen(card) }}</span>
+          </button>
         </div>
       </section>
 
@@ -149,6 +162,12 @@ interface AutomationStatusCard extends FollowUpCardData {
   latestEvent: string;
   pausedUntil?: string | null;
   stopped?: boolean;
+  // 2026-06-15 — per-lần-gắn (manual followup): mỗi lần gắn 1 card riêng.
+  enrollmentId?: string;
+  enrollSeq?: number;
+  derivedState?: CardState; // BE truyền sẵn state per-run (không tự derive)
+  enrolledAt?: string;
+  lastSentAt?: string | null;
   // YC3 timing (Đợt 2): BE trả 4 mốc per luồng.
   etaCompleteAt?: string | null; // bao lâu nữa xong (ISO)
   holdReason?: 'running' | 'waiting_reply' | 'out_of_hours' | 'nick_offline' | 'completed' | 'stopped' | null;
@@ -210,6 +229,19 @@ const runningCards = computed(() => cards.value.filter((c) => c.state === 'activ
 const completedCards = computed(() => cards.value.filter((c) => c.state === 'completed'));
 const historyCards = computed(() => cards.value.filter((c) => c.state === 'stopped'));
 
+// 2026-06-15: 2 nhóm xong THU GỌN mặc định (anh chốt — bấm mới mở). Đang chạy luôn hiện.
+const showCompleted = ref(false);
+const showHistory = ref(false);
+
+// Ngày "xong" hiển thị ở dòng thu gọn — ưu tiên lần gửi cuối, fallback ngày gắn.
+function doneWhen(card: AutomationStatusCard): string {
+  const iso = card.lastSentAt || card.enrolledAt || card.latestAt;
+  if (!iso) return '';
+  const d = new Date(iso as string);
+  return d.toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', timeZone: 'Asia/Ho_Chi_Minh' })
+    + ' ' + d.toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Ho_Chi_Minh' });
+}
+
 // ── Derive UI state (đồng bộ logic server deriveFollowupState 2026-06-07) ──
 // THỨ TỰ ƯU TIÊN — KHỚP backend manual-control-routes.ts:
 //   1. stopped (sale dừng / KH chặn)
@@ -219,6 +251,9 @@ const historyCards = computed(() => cards.value.filter((c) => c.state === 'stopp
 //   3. paused (pausedUntilMs>0, không còn job)
 //   4. completed (hết job + đã đi hết bước)
 function deriveState(card: AutomationStatusCard): CardState {
+  // 2026-06-15: run manual followup BE đã biết state chính xác per-lần-gắn → tôn trọng,
+  // KHÔNG tự derive (run cũ progressUnknown totalSteps=null sẽ bị nhầm 'active').
+  if (card.derivedState) return card.derivedState;
   if (card.stopped) return 'stopped';
   if (card.nextRunAt) return 'active';
   if ((card.pausedUntilMs ?? 0) > 0) return 'paused';
@@ -280,7 +315,11 @@ async function fetchStatus(): Promise<void> {
       // chờ-khách-reply + chưa dừng.
       advanceEnabled: !!c.nextRunAt && !!c.sequenceId && c.holdReason !== 'waiting_reply' && !c.stopped,
     }));
-    cards.value = groupBySequence(mapped);
+    // 2026-06-15: CHỈ gom các card ĐANG CHẠY cùng sequence (gọn 1 card đang chạy). Card đã
+    // xong/lịch sử = mỗi LẦN GẮN 1 dòng riêng (KHÔNG gom — nếu không lại ẩn mất luồng cũ).
+    const running = mapped.filter((c) => c.state === 'active' || c.state === 'paused');
+    const rest = mapped.filter((c) => c.state !== 'active' && c.state !== 'paused');
+    cards.value = [...groupBySequence(running), ...rest];
   } catch (err) {
     console.error('[automation-status] fetch failed', err);
     cards.value = [];
@@ -568,6 +607,48 @@ defineExpose({ refetch: fetchStatus });
   text-align: center;
 }
 .acl-cards { display: flex; flex-direction: column; gap: 10px; margin-top: 9px; }
+
+/* ── Nhóm "đã xong / lịch sử" thu gọn (2026-06-15) ── */
+.acl-sec__title--toggle {
+  width: 100%;
+  background: none;
+  border: 0;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.acl-sec__title--toggle:hover { color: var(--ink-2); }
+.acl-chev { margin-left: 6px; color: var(--ink-4); transition: transform 0.15s; flex-shrink: 0; }
+.acl-chev.open { transform: rotate(180deg); }
+.acl-done-list { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; }
+.acl-done-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ink-2);
+  cursor: pointer;
+  text-align: left;
+  transition: 0.12s;
+}
+.acl-done-row:hover { background: var(--surface-3); }
+.acl-done-name { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.acl-done-seq {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--ink-3);
+  background: var(--surface-3);
+  border-radius: var(--r-pill);
+  padding: 1px 7px;
+}
+.acl-done-when { flex-shrink: 0; font-size: 11px; color: var(--ink-4); }
 
 /* ── Add CTA ── */
 .acl-cta {
