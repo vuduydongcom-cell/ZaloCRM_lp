@@ -33,6 +33,8 @@ import { chatRoutes } from './modules/chat/chat-routes.js';
 import { folderRoutes } from './modules/chat/folder-routes.js';
 import { presetRoutes } from './modules/chat/preset-routes.js';
 import { chatAttachmentRoutes } from './modules/chat/chat-attachment-routes.js';
+import { deviceRoutes } from './modules/devices/device-routes.js';
+import { configRoutes } from './modules/config/config-routes.js';
 import { mediaRoutes } from './modules/media/media-routes.js';
 import { contactRoutes } from './modules/contacts/contact-routes.js';
 import { statusRoutes } from './modules/contacts/status-routes.js';
@@ -233,6 +235,8 @@ async function bootstrap() {
   await app.register(folderRoutes);
   await app.register(presetRoutes);
   await app.register(chatAttachmentRoutes);
+  await app.register(deviceRoutes);
+  await app.register(configRoutes);
   await app.register(mediaRoutes);
   await app.register(contactRoutes);
   await app.register(statusRoutes);
