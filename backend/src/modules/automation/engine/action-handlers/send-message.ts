@@ -250,8 +250,10 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
     if (i > 0) await sleep(sendGapMs());
 
     let sdkResult: Record<string, unknown> = {};
-    let persistContent: string;
-    let persistContentType = 'text';
+    // 2026-06-18 FIX (anh báo bot gửi file/ảnh/album hiện RAW JSON `{"text":"","attachments":[...]}`):
+    // persist content theo ĐÚNG shape FE message-bubble đọc (top-level href/name/size/mime, KHÔNG
+    // lồng {text,attachments}). Album = N row ảnh (1 row/ảnh) khớp đường gửi tay chat-attachment-routes.
+    let persistRows: Array<{ content: string; contentType: string }> = [];
     // Đường B: dọn temp media sau khi gửi (download URL → local path cho zca-js).
     const tmpCleanups: Array<() => Promise<void>> = [];
 
@@ -269,10 +271,12 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
         if (sendStranger) msgPayload.allowStrangerMessage = true; // FIX #1 tầng 2: vào hộp người lạ
         const raw = await zaloOps.sendMessage(ctx.assignedNickId, threadId, threadType, msgPayload);
         sdkResult = (raw as Record<string, unknown>) || {};
-        persistContent = useStyles
-          ? JSON.stringify({ title: rendered, action: 'rtf', params: JSON.stringify({ styles }) })
-          : rendered;
-        persistContentType = 'text';
+        persistRows = [{
+          content: useStyles
+            ? JSON.stringify({ title: rendered, action: 'rtf', params: JSON.stringify({ styles }) })
+            : rendered,
+          contentType: 'text',
+        }];
       } else if (m.messageType === 'image') {
         const caption = m.payload.caption ? await renderTemplate(m.payload.caption, ctx.contactId, ctx.assignedNickId) : '';
         // Đường B: download URL → local path (zca-js readFile path, KHÔNG nhận url).
@@ -281,8 +285,7 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
         tmpCleanups.push(tmp.cleanup);
         const raw = await zaloOps.sendImage(ctx.assignedNickId, threadId, threadType, [tmp.path], null, caption);
         sdkResult = (raw as Record<string, unknown>) || {};
-        persistContent = JSON.stringify({ text: caption, attachments: [{ kind: 'image', url: m.payload.url, caption }] });
-        persistContentType = 'image';
+        persistRows = [{ content: JSON.stringify({ href: m.payload.url, thumb: m.payload.url, size: 0, caption }), contentType: 'image' }];
       } else if (m.messageType === 'album') {
         // S4 edge case: giới hạn ≤12 ảnh/lần tránh quá tải SDK Zalo (như endpoint gửi tay).
         const allItems = m.payload.items.map((it) => ({ url: it.url, caption: it.caption ?? '' }));
@@ -299,8 +302,8 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
         }
         const raw = await zaloOps.sendImage(ctx.assignedNickId, threadId, threadType, paths, null, items[0]?.caption ?? '');
         sdkResult = (raw as Record<string, unknown>) || {};
-        persistContent = JSON.stringify({ text: '', attachments: items.map((it) => ({ kind: 'image', url: it.url, caption: it.caption })) });
-        persistContentType = 'image';
+        // Album: 1 row/ảnh (FE render mỗi message = 1 ảnh) — khớp đường gửi tay.
+        persistRows = items.map((it) => ({ content: JSON.stringify({ href: it.url, thumb: it.url, size: 0, caption: it.caption ?? '' }), contentType: 'image' }));
       } else if (m.messageType === 'video') {
         const caption = m.payload.caption ? await renderTemplate(m.payload.caption, ctx.contactId, ctx.assignedNickId) : '';
         const tmp = await downloadMediaToTemp({ url: m.payload.url }, 'video');
@@ -315,8 +318,7 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
           raw = await zaloOps.sendFile(ctx.assignedNickId, threadId, threadType, [tmp.path], null, caption);
         }
         sdkResult = (raw as Record<string, unknown>) || {};
-        persistContent = JSON.stringify({ text: caption, attachments: [{ kind: 'video', url: m.payload.url, caption }] });
-        persistContentType = 'video';
+        persistRows = [{ content: JSON.stringify({ href: m.payload.url, thumb: m.payload.thumbnailUrl ?? '', thumbUrl: m.payload.thumbnailUrl ?? '', size: 0, caption }), contentType: 'video' }];
       } else if (m.messageType === 'file') {
         const caption = m.payload.caption ? await renderTemplate(m.payload.caption, ctx.contactId, ctx.assignedNickId) : '';
         // 2026-06-13 (Zalo mất tên file): filename block thường TRỐNG → truy tên thật từ Kho qua
@@ -330,8 +332,7 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
         tmpCleanups.push(tmp.cleanup);
         const raw = await zaloOps.sendFile(ctx.assignedNickId, threadId, threadType, [tmp.path], null, caption);
         sdkResult = (raw as Record<string, unknown>) || {};
-        persistContent = JSON.stringify({ text: caption, attachments: [{ kind: 'file', url: m.payload.url, filename: sendName, caption }] });
-        persistContentType = 'file';
+        persistRows = [{ content: JSON.stringify({ href: m.payload.url, name: sendName, size: m.payload.sizeBytes ?? 0, mime: m.payload.mimeType ?? '' }), contentType: 'file' }];
       } else {
         continue;
       }
@@ -372,29 +373,35 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
     const zaloMsgId = String(sr?.message?.msgId ?? sr?.msgId ?? '');
     lastZaloMsgId = zaloMsgId;
     try {
-      lastMessageRow = await prisma.message.create({
-        data: {
-          id: randomUUID(),
-          conversationId: conversation.id,
-          zaloMsgId: zaloMsgId || null,
-          zaloMsgIdNum: zaloMsgId && /^\d+$/.test(zaloMsgId) ? BigInt(zaloMsgId) : null,
-          senderType: 'self',
-          senderUid: '',
-          senderName: 'Bot-Auto',
-          content: persistContent,
-          contentType: persistContentType,
-          sentAt: new Date(),
-          sentVia: 'automation',
-          // metadata.sender → badge "⚙️ Tự động · {sequence} · Bước N/M" trong UI chat.
-          metadata: { sender: senderMeta },
-        },
-        select: {
-          id: true, content: true, contentType: true, sentAt: true,
-          // FIX realtime: emit cần đủ field FE render (badge tự động, phân biệt self).
-          senderType: true, senderName: true, sentVia: true, zaloMsgId: true,
-          conversationId: true, metadata: true,
-        },
-      });
+      // Persist từng row (album = N row ảnh). zaloMsgId chỉ gắn row ĐẦU (1 batch Zalo = 1 msgId)
+      // → tránh đụng unique zaloMsgIdNum khi nhiều ảnh chung 1 msgId.
+      for (let pi = 0; pi < persistRows.length; pi++) {
+        const row = persistRows[pi];
+        const firstWithId = pi === 0 && !!zaloMsgId;
+        lastMessageRow = await prisma.message.create({
+          data: {
+            id: randomUUID(),
+            conversationId: conversation.id,
+            zaloMsgId: firstWithId ? zaloMsgId : null,
+            zaloMsgIdNum: firstWithId && /^\d+$/.test(zaloMsgId) ? BigInt(zaloMsgId) : null,
+            senderType: 'self',
+            senderUid: '',
+            senderName: 'Bot-Auto',
+            content: row.content,
+            contentType: row.contentType,
+            sentAt: new Date(),
+            sentVia: 'automation',
+            // metadata.sender → badge "⚙️ Tự động · {sequence} · Bước N/M" trong UI chat.
+            metadata: { sender: senderMeta },
+          },
+          select: {
+            id: true, content: true, contentType: true, sentAt: true,
+            // FIX realtime: emit cần đủ field FE render (badge tự động, phân biệt self).
+            senderType: true, senderName: true, sentVia: true, zaloMsgId: true,
+            conversationId: true, metadata: true,
+          },
+        });
+      }
     } catch (err) {
       logger.error(`[send-message] persist tin ${i + 1} lỗi (Zalo đã gửi):`, err);
     }
@@ -407,7 +414,7 @@ export async function sendMessageHandler(ctx: ActionContext): Promise<ActionResu
     // null) → emit ở đây là DUY NHẤT, không trùng. Media (image/video/file) lưu zaloMsgId
     // KHÔNG null → echo claim-placeholder trượt → echo-path tự insert + emit riêng; nếu emit
     // cả ở đây sẽ ra 2 tin. Tin bám đuổi chủ yếu là text; media để echo-path xử như cũ.
-    if (lastMessageRow && persistContentType === 'text') {
+    if (lastMessageRow && persistRows[0]?.contentType === 'text') {
       try {
         const io = zaloPool.getIO();
         await emitChatMessage({
