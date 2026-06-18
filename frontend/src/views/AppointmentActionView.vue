@@ -121,7 +121,13 @@ onMounted(load);
    → dùng 100dvh (vùng nhìn thấy thật) + fallback 100vh. Căn giữa bằng margin:auto trên
    card (KHÔNG dùng align-items:center) để khi card cao hơn màn vẫn cuộn được, không cụt
    đỉnh. index.html có viewport-fit=cover → chừa safe-area (notch/home indicator). */
-.aa-wrap { min-height: 100vh; min-height: 100dvh; display: flex; justify-content: center; overflow-y: auto;
+/* 2026-06-18 FIX lệch NGANG mobile thật: trang công khai này bị bọc AuthLayout
+   (<v-app>/<v-main> Vuetify, d-flex) + global #app{min-width:1100px}. Hệ quả: .aa-wrap
+   co theo nội dung (≈380px) & dính padding layout của v-main → card bị đẩy sang phải,
+   tràn khỏi màn (nền xám auth-shell lòi ra). → ghim position:fixed inset:0 phủ đúng
+   viewport, thoát cả v-main lẫn #app 1100px. Giữ nguyên dvh/safe-area/cuộn của fix 2026-06-17. */
+.aa-wrap { position: fixed; inset: 0; box-sizing: border-box;
+  min-height: 100vh; min-height: 100dvh; display: flex; justify-content: center; overflow-y: auto;
   padding: calc(16px + env(safe-area-inset-top)) calc(16px + env(safe-area-inset-right)) calc(16px + env(safe-area-inset-bottom)) calc(16px + env(safe-area-inset-left));
   background: linear-gradient(160deg, #0e445a 0%, #06222f 100%); }
 .aa-card { width: 100%; max-width: 380px; margin: auto; background: #fff; border-radius: 16px; padding: 22px 20px 24px;
