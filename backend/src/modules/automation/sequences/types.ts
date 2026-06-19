@@ -13,7 +13,10 @@
 export interface SequenceStep {
   stepId: string;            // stable identifier (UI uses for drag-drop, react keys)
   blockId: string;           // FK to Block.id
-  delayMinutes: number;      // wait BEFORE this step executes (≥ 0)
+  delayMinutes: number;      // wait BEFORE this step executes (≥ 0) — CỐ ĐỊNH
+  // 2026-06-19 (anh chốt: gộp Luật 2 vào step): jitter ± random PHÚT quanh delayMinutes
+  // (chống Zalo nghi bot). 0/undefined = không random. Gửi thực = delay ± random(0..jitter).
+  delayJitterMinutes?: number;
   exitCondition?: string;    // optional gate name, future use
 }
 
@@ -40,11 +43,17 @@ export interface SequenceRuntimeRules {
   // Engine ƯU TIÊN đọc field này; allowedHourRange chỉ còn fallback cho data cũ.
   // end="23:00" = dừng đúng 23:00 (tin cuối ≤ 22:59); muốn tới hết ngày set "24:00".
   allowedTimeRange?: [string, string];
-  // Luật 2 — giãn cách giữa các lần gửi (giây→ngày). Worker tính delay bước kế từ đây
-  // (thay step.delayMinutes nếu set). Trước đây randomDelayPerSend là dead config.
+  // Luật 2 (DEPRECATED 2026-06-19) — đã gộp vào step (delayMinutes + delayJitterMinutes).
+  // Giữ field để đọc data cũ lúc migrate; engine KHÔNG dùng nữa, UI đã gỡ.
   sendGap?: SendGap;
   // Luật 3 — chống spam: không enroll lại CÙNG luồng cho 1 KH trong X ngày (default 30).
   reEnrollCooldownDays?: number;
+  // Luật 4 (2026-06-19, anh chốt wire thật) — phối hợp phiên chăm sóc:
+  //   coordinateCareSession=true → KH trả lời thì HOLD bám đuổi careHoldHours giờ, hết giờ
+  //   (khách im) tự gửi tiếp từ bước dở. false → KH trả lời cũng KHÔNG hold, gửi đúng timeline.
+  //   Áp cho CẢ luồng trigger lẫn gắn-tay (đọc từ rule của sequence). Default true, 24h.
+  coordinateCareSession?: boolean;
+  careHoldHours?: number;
 
   // ── Luật cũ — đọc-nếu-có, UI 4-luật KHÔNG phơi (giữ để không vỡ data cũ, D1.5) ──
   randomDelayPerSend?: { min: number; max: number };
@@ -98,6 +107,12 @@ export function validateSteps(
     // Cap delay at 60 days = 86400 minutes (defensive against typos like delayDays in minutes field)
     if (step.delayMinutes > 86400) {
       return { ok: false, error: `step '${step.stepId}' delayMinutes > 60 ngày, kiểm tra lại` };
+    }
+    // 2026-06-19 — jitter ± phút (tuỳ chọn): 0..1440 (tối đa 1 ngày dao động).
+    if (step.delayJitterMinutes !== undefined) {
+      if (typeof step.delayJitterMinutes !== 'number' || step.delayJitterMinutes < 0 || step.delayJitterMinutes > 1440) {
+        return { ok: false, error: `step '${step.stepId}' delayJitterMinutes phải 0–1440 phút` };
+      }
     }
   }
   return { ok: true, steps: steps as SequenceStep[] };
@@ -189,6 +204,16 @@ export function validateRuntimeRules(
   }
   if (r.stopOnAccept !== undefined && typeof r.stopOnAccept !== 'boolean') {
     return { ok: false, error: 'stopOnAccept phải là boolean' };
+  }
+
+  // Luật 4 (2026-06-19) — phối hợp phiên chăm sóc.
+  if (r.coordinateCareSession !== undefined && typeof r.coordinateCareSession !== 'boolean') {
+    return { ok: false, error: 'coordinateCareSession phải là boolean' };
+  }
+  if (r.careHoldHours !== undefined) {
+    if (typeof r.careHoldHours !== 'number' || r.careHoldHours <= 0 || r.careHoldHours > 720) {
+      return { ok: false, error: 'careHoldHours phải là số giờ 0–720 (≤30 ngày)' };
+    }
   }
 
   return { ok: true, rules: r as SequenceRuntimeRules };

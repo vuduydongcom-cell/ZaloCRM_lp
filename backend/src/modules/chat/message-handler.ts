@@ -737,25 +737,30 @@ export async function handleIncomingMessage(
                 if (triggerId) {
                   const trigger = await prisma.automationTrigger.findUnique({
                     where: { id: triggerId },
-                    select: { pauseOnActivityHours: true, name: true },
+                    select: { name: true },
                   });
                   if (trigger?.name) triggerName = trigger.name;
                   const { setContactPauseFlag, getPendingStepIdxBySequence } = await import(
                     '../automation/queues/event-hooks.js'
                   );
-                  await setContactPauseFlag(triggerId, careContactId, trigger?.pauseOnActivityHours ?? 24);
                   // Scan BullMQ 1 lần → bước dở của từng luồng (per sourceSequenceId).
                   stepIdxBySequence = await getPendingStepIdxBySequence(triggerId, careContactId);
+                  // 2026-06-19 (Luật 4 wire): pause-mark TRƯỚC (đọc rule từng sequence, bỏ qua luồng
+                  // tắt Luật 4 + set pausedUntil theo careHoldHours). CHỈ set cờ Redis khi CÓ phiên
+                  // thật bị hold → luồng tắt Luật 4 (paused=0) gửi đúng lịch, không hold giờ nào.
                   const { pauseSessionsOnReply } = await import(
                     '../automation/care-session/care-session-service.js'
                   );
-                  const { paused } = await pauseSessionsOnReply({
+                  const { paused, holdHours } = await pauseSessionsOnReply({
                     orgId: account.orgId,
                     contactId: careContactId,
                     stepIdxBySequence,
                   });
                   if (paused > 0) {
-                    logger.info(`[message-handler] customer_reply LUẬT 4 pause-mark ${paused} phiên contact=${careContactId} (giữ tiến độ, worker guard chặn gửi)`);
+                    await setContactPauseFlag(triggerId, careContactId, holdHours);
+                    logger.info(`[message-handler] customer_reply LUẬT 4 pause-mark ${paused} phiên contact=${careContactId} hold=${holdHours}h (giữ tiến độ, worker chặn gửi)`);
+                  } else {
+                    logger.info(`[message-handler] customer_reply contact=${careContactId} — KHÔNG hold (Luật 4 tắt cho mọi luồng) → gửi đúng lịch`);
                   }
                 }
 

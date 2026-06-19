@@ -290,13 +290,31 @@ export async function pauseSessionsOnReply(args: {
   orgId: string;
   contactId: string;
   stepIdxBySequence: Map<string, number>;
-}): Promise<{ paused: number }> {
+}): Promise<{ paused: number; holdHours: number }> {
   const sessions = await prisma.careSession.findMany({
     where: { orgId: args.orgId, contactId: args.contactId, state: 'active', sourceSequenceId: { not: null } },
     select: { id: true, sourceSequenceId: true, pauseEpoch: true },
   });
+  if (sessions.length === 0) return { paused: 0, holdHours: 0 };
+
+  // 2026-06-19 (Luật 4 wire thật): đọc rule của TỪNG sequence → coordinateCareSession + careHoldHours.
+  const seqIds = [...new Set(sessions.map((s) => s.sourceSequenceId).filter((x): x is string => !!x))];
+  const seqs = await prisma.automationSequence.findMany({
+    where: { id: { in: seqIds } },
+    select: { id: true, runtimeRules: true },
+  });
+  const ruleBySeq = new Map(seqs.map((q) => [q.id, (q.runtimeRules ?? {}) as { coordinateCareSession?: boolean; careHoldHours?: number }]));
+
   let paused = 0;
+  let skipped = 0;
+  let maxHoldHours = 0;
   for (const s of sessions) {
+    const rules = s.sourceSequenceId ? ruleBySeq.get(s.sourceSequenceId) : undefined;
+    // Luật 4 TẮT (coordinateCareSession === false) → KHÔNG hold: bỏ qua, để worker gửi đúng lịch.
+    if (rules?.coordinateCareSession === false) { skipped++; continue; }
+
+    const holdHours = (typeof rules?.careHoldHours === 'number' && rules.careHoldHours > 0) ? rules.careHoldHours : 24;
+    if (holdHours > maxHoldHours) maxHoldHours = holdHours;
     const stepIdx = s.sourceSequenceId ? args.stepIdxBySequence.get(s.sourceSequenceId) : undefined;
     // stepIdx undefined = không có job pending (đã gửi xong / chưa bắt đầu) → vẫn tăng
     // epoch để chống resume cũ, nhưng pausedAtStepIdx null (resume không re-enqueue).
@@ -306,15 +324,17 @@ export async function pauseSessionsOnReply(args: {
         data: {
           pausedAtStepIdx: stepIdx ?? null,
           pauseEpoch: (s.pauseEpoch ?? 0) + 1,
+          // 2026-06-19: giờ hold theo rule sequence (thay pauseOnActivityHours của trigger).
+          pausedUntil: new Date(Date.now() + holdHours * 3600_000),
         },
       })
       .catch((e) => logger.warn(`[care-session] pauseSessionsOnReply update failed session=${s.id}: ${(e as Error).message}`));
     paused++;
   }
-  if (paused > 0) {
-    logger.info(`[care-session] LUẬT 4 pause-mark ${paused} phiên contact=${args.contactId} (reply)`);
+  if (paused > 0 || skipped > 0) {
+    logger.info(`[care-session] LUẬT 4 reply contact=${args.contactId}: pause-mark ${paused} phiên, bỏ-qua ${skipped} (Luật 4 tắt)`);
   }
-  return { paused };
+  return { paused, holdHours: maxHoldHours || 24 };
 }
 
 /**

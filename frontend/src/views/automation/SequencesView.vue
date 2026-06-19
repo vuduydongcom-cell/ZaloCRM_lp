@@ -211,36 +211,13 @@
               </div>
             </div>
 
-            <!-- Luật 2: Giãn cách giữa các lần gửi (sendGap, giây→ngày) -->
-            <div class="rule-card">
-              <div class="rule-card__header">
-                <v-icon size="18" color="primary">mdi-timer-sand</v-icon>
-                <strong>Luật 2 · Giãn cách giữa các lần gửi</strong>
-              </div>
-              <div class="rule-card__body">
-                <div class="rule-row">
-                  <div class="rule-input-pair rule-input-pair--gap">
-                    <span class="rule-mini-label">Từ</span>
-                    <input class="rule-num" :value="sendGapMin" type="number" min="0" @input="setSendGapMin(($event.target as HTMLInputElement).value)" />
-                    <span class="rule-mini-label">đến</span>
-                    <input class="rule-num" :value="sendGapMax" type="number" min="0" @input="setSendGapMax(($event.target as HTMLInputElement).value)" />
-                    <select class="rule-select" :value="sendGapUnit" @change="setSendGapUnit(($event.target as HTMLSelectElement).value)">
-                      <option value="second">giây</option>
-                      <option value="minute">phút</option>
-                      <option value="hour">giờ</option>
-                      <option value="day">ngày</option>
-                    </select>
-                  </div>
-                  <p class="rule-hint">Mỗi bước nghỉ NGẪU NHIÊN trong khoảng {{ sendGapMin }}–{{ sendGapMax }} (giả lập tự nhiên, tránh Zalo nghi bot). Thời gian được chọn ngay khi gửi xong bước trước.</p>
-                </div>
-              </div>
-            </div>
+            <!-- (Giãn cách giữa các bước đã GỘP vào từng bước — xem "Các bước trong luồng") -->
 
-            <!-- Luật 3: Chống làm phiền khách (cooldown X ngày) -->
+            <!-- Luật 2: Chống làm phiền khách (cooldown X ngày) -->
             <div class="rule-card">
               <div class="rule-card__header">
                 <v-icon size="18" color="warning">mdi-shield-account-outline</v-icon>
-                <strong>Luật 3 · Chống làm phiền khách</strong>
+                <strong>Luật 2 · Chống làm phiền khách</strong>
               </div>
               <div class="rule-card__body">
                 <div class="rule-row">
@@ -254,19 +231,30 @@
               </div>
             </div>
 
-            <!-- Luật 4: Phối hợp Phiên chăm sóc (toggle) -->
+            <!-- Luật 3: Phối hợp Phiên chăm sóc (toggle + giờ hold) -->
             <div class="rule-card">
               <div class="rule-card__header">
                 <v-icon size="18" color="success">mdi-chat-processing-outline</v-icon>
-                <strong>Luật 4 · Phối hợp Phiên chăm sóc</strong>
+                <strong>Luật 3 · Phối hợp Phiên chăm sóc</strong>
               </div>
               <div class="rule-card__body">
                 <div class="rule-row rule-row--switch">
                   <button class="toggle" :class="{ on: coordinateCareSession }" @click="setCoordinateCareSession(!coordinateCareSession)"></button>
                   <div>
-                    <label>Khách trả lời → tạm dừng → hết phiên tự chạy tiếp</label>
-                    <p class="rule-hint">Khi khách trả lời, tạm dừng bám đuổi để sale chăm tay. Hết phiên (khách im) tự chạy tiếp từ bước đang dở. (Khuyến nghị bật.)</p>
+                    <label>Khách trả lời → tạm dừng bám đuổi để sale chăm tay</label>
+                    <p class="rule-hint">
+                      <strong>BẬT:</strong> khách trả lời → tạm dừng; khách im quá số giờ bên dưới → tự gửi tiếp từ bước đang dở (hoặc bấm "Tiếp tục ngay").
+                      <br><strong>TẮT:</strong> khách trả lời cũng KHÔNG dừng — gửi đúng lịch 100%.
+                    </p>
                   </div>
+                </div>
+                <div v-if="coordinateCareSession" class="rule-row">
+                  <div class="rule-input-pair">
+                    <span class="rule-mini-label">Tạm dừng khi khách trả lời:</span>
+                    <input class="rule-num" :value="careHoldHours" type="number" min="1" max="720" @input="setCareHoldHours(($event.target as HTMLInputElement).value)" />
+                    <span class="suffix">giờ</span>
+                  </div>
+                  <p class="rule-hint">Khách im quá ngần này giờ (không trả lời thêm) → hệ thống tự gửi bước kế. VD: 24 = 1 ngày, 1 = 1 giờ, 0.5 không hợp lệ (tối thiểu 1 giờ).</p>
                 </div>
               </div>
             </div>
@@ -541,30 +529,9 @@ function applyTimeRange(start: string, end: string) {
 function setTimeStart(v: string) { applyTimeRange(v || '00:00', timeEnd.value); }
 function setTimeEnd(v: string)   { applyTimeRange(timeStart.value, v || '23:59'); }
 
-// ── 4 LUẬT MỚI (recode 2026-06-14) — ghi đúng field BE engine đọc ──────────
-// Luật 2: sendGap RANDOM { min, max, unit } (default 15-30 phút). Engine pick ngẫu
-// nhiên trong [min,max] mỗi bước. Đọc legacy value (cố định) → coi min=max=value.
-type GapUnit = 'second' | 'minute' | 'hour' | 'day';
-const sendGapMin = computed(() => {
-  const g = editing.value?.runtimeRules.sendGap;
-  return g?.min ?? g?.value ?? 15;
-});
-const sendGapMax = computed(() => {
-  const g = editing.value?.runtimeRules.sendGap;
-  return g?.max ?? g?.value ?? 30;
-});
-const sendGapUnit = computed<GapUnit>(() => editing.value?.runtimeRules.sendGap?.unit ?? 'minute');
-function writeSendGap(min: number, max: number, unit: GapUnit) {
-  if (!editing.value) return;
-  // min ≤ max (tự sửa nếu nhập ngược).
-  const lo = Math.max(0, min);
-  const hi = Math.max(lo, max);
-  editing.value.runtimeRules.sendGap = { min: lo, max: hi, unit };
-}
-function setSendGapMin(v: string | number) { writeSendGap(Number(v) || 0, sendGapMax.value, sendGapUnit.value); }
-function setSendGapMax(v: string | number) { writeSendGap(sendGapMin.value, Number(v) || 0, sendGapUnit.value); }
-function setSendGapUnit(u: string) { writeSendGap(sendGapMin.value, sendGapMax.value, u as GapUnit); }
-// Luật 3: reEnrollCooldownDays (default 30). BE: checkReEnrollCooldown.
+// ── LUẬT (recode 2026-06-14, 2026-06-19 gộp giãn cách vào step) ──────────────
+// Luật 2 (giãn cách giữa bước) ĐÃ BỎ — cấu hình ở TỪNG BƯỚC (delayMinutes + jitter).
+// Luật 2 mới = chống làm phiền (reEnrollCooldownDays, default 30). BE: checkReEnrollCooldown.
 const cooldownDays = computed(() => editing.value?.runtimeRules.reEnrollCooldownDays ?? 30);
 function setCooldownDays(v: string | number) {
   if (!editing.value) return;
@@ -575,6 +542,13 @@ const coordinateCareSession = computed(() => editing.value?.runtimeRules.coordin
 function setCoordinateCareSession(on: boolean) {
   if (!editing.value) return;
   editing.value.runtimeRules.coordinateCareSession = on;
+}
+// Luật 4 (2026-06-19): giờ hold khi KH trả lời (default 24h). 1–720 giờ.
+const careHoldHours = computed(() => editing.value?.runtimeRules.careHoldHours ?? 24);
+function setCareHoldHours(v: string | number) {
+  if (!editing.value) return;
+  const n = Math.max(1, Math.min(720, Math.round(Number(v) || 24)));
+  editing.value.runtimeRules.careHoldHours = n;
 }
 
 async function loadAll() {
@@ -624,9 +598,9 @@ function openCreateDrawer() {
       // 4 luật mới (recode) — engine đọc các field này.
       allowedHourRange: [6, 22],
       allowedTimeRange: ['06:00', '22:00'],
-      sendGap: { min: 15, max: 30, unit: 'minute' as const }, // luật 2: random 15-30 phút
-      reEnrollCooldownDays: 30,        // luật 3
-      coordinateCareSession: true,     // luật 4
+      reEnrollCooldownDays: 30,        // luật 2 (chống làm phiền)
+      coordinateCareSession: true,     // luật 3 (phối hợp phiên chăm sóc)
+      careHoldHours: 24,               // luật 3: giờ hold khi KH trả lời
       // legacy — giữ để không vỡ data cũ.
       randomDelayPerSend: { min: 15, max: 45 },
       perNickThrottle: true,

@@ -41,17 +41,22 @@ describe('sendGapToMs — RANDOM [min,max] (anh chốt 2026-06-15)', () => {
   });
 });
 
-describe('stepDelayMs — ưu tiên sendGap, fallback delayMinutes', () => {
-  it('legacy value → dùng sendGap cố định (KHÔNG dùng delayMinutes)', () => {
-    expect(stepDelayMs({ sendGap: { value: 10, unit: 'second' } }, 99)).toBe(10_000);
+describe('stepDelayMs — delayMinutes CỐ ĐỊNH ± jitter (2026-06-19, gộp Luật 2 vào step)', () => {
+  it('không jitter → đúng delayMinutes', () => {
+    expect(stepDelayMs(5)).toBe(300_000);
+    expect(stepDelayMs(1, 0)).toBe(60_000);
+    expect(stepDelayMs(0)).toBe(0);
   });
-  it('random min/max → pick trong khoảng (rand inject)', () => {
-    expect(stepDelayMs({ sendGap: { min: 1, max: 3, unit: 'minute' } }, 99, () => 0)).toBe(60_000);
-    expect(stepDelayMs({ sendGap: { min: 1, max: 3, unit: 'minute' } }, 99, () => 1)).toBe(180_000);
+  it('jitter ± random quanh delay (rand inject)', () => {
+    // rand=0.5 → delta 0 → đúng delay (điểm giữa, dùng cho preview/ETA).
+    expect(stepDelayMs(10, 5, () => 0.5)).toBe(600_000);
+    // rand=1 → +jitter: 10 + 5 = 15 phút.
+    expect(stepDelayMs(10, 5, () => 1)).toBe(900_000);
+    // rand=0 → -jitter: 10 - 5 = 5 phút.
+    expect(stepDelayMs(10, 5, () => 0)).toBe(300_000);
   });
-  it('không sendGap → fallback delayMinutes', () => {
-    expect(stepDelayMs({}, 5)).toBe(300_000);
-    expect(stepDelayMs(null, 1)).toBe(60_000);
+  it('jitter kéo âm → clamp 0 (không gửi trước thời điểm)', () => {
+    expect(stepDelayMs(2, 5, () => 0)).toBe(0); // 2 - 5 < 0 → 0
   });
 });
 

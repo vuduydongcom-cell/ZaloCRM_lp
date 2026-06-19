@@ -80,6 +80,8 @@ export interface SequenceStep {
   stepId: string;
   blockId: string;
   delayMinutes: number;
+  // 2026-06-19 (gộp Luật 2 vào step): ± random phút quanh delayMinutes (chống bot). 0 = tắt.
+  delayJitterMinutes?: number;
   exitCondition?: string;
 }
 
@@ -98,10 +100,11 @@ export interface SequenceRuntimeRules {
   maxAttemptsPerContact?: number; // mỗi KH nhận tối đa N tin của luồng (0 = không giới hạn)
   stopOnStatusIds?: string[];     // KH đạt 1 trong các trạng thái này → dừng hẳn
   // ── 4 LUẬT MỚI (recode 2026-06-14) — engine recode đọc các field này ──────
-  // luật 2: giãn cách RANDOM [min,max] cùng đơn vị (default 15-30 phút). value=legacy cố định.
+  // luật 2 (DEPRECATED 2026-06-19 — đã gộp vào step.delayJitterMinutes). Giữ đọc data cũ.
   sendGap?: { min?: number; max?: number; value?: number; unit: 'second' | 'minute' | 'hour' | 'day' };
   reEnrollCooldownDays?: number;  // luật 3: không gắn lại cùng luồng trong N ngày (default 30)
   coordinateCareSession?: boolean; // luật 4: reply→dừng→hết phiên chạy tiếp (default true)
+  careHoldHours?: number;          // luật 4 (2026-06-19): giờ hold khi KH reply (default 24)
 }
 
 export interface AutomationSequence {

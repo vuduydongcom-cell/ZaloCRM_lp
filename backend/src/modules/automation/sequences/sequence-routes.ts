@@ -51,6 +51,7 @@ async function syncSequenceStepsTable(sequenceId: string, steps: SequenceStep[])
           blockId: s.blockId || null,
           stepOrder: idx,
           delayMinutes: s.delayMinutes ?? 0,
+          jitterMinutes: s.delayJitterMinutes ?? 0,
           ...(s.exitCondition ? { exitCondition: s.exitCondition as unknown as object } : {}),
         },
       });
@@ -213,11 +214,11 @@ export async function sequenceRoutes(app: FastifyInstance): Promise<void> {
     // Steps (dual-read: FK table ưu tiên, fallback JSON — như worker).
     let steps = (await prisma.sequenceStep.findMany({
       where: { sequenceId: id }, orderBy: { stepOrder: 'asc' },
-      select: { blockId: true, delayMinutes: true },
-    })).map((r) => ({ blockId: r.blockId, delayMinutes: r.delayMinutes }));
+      select: { blockId: true, delayMinutes: true, jitterMinutes: true },
+    })).map((r) => ({ blockId: r.blockId, delayMinutes: r.delayMinutes, jitterMinutes: r.jitterMinutes ?? 0 }));
     if (steps.length === 0) {
       steps = (Array.isArray(sequence.steps) ? (sequence.steps as unknown as SequenceStep[]) : [])
-        .map((s) => ({ blockId: s.blockId, delayMinutes: s.delayMinutes ?? 0 }));
+        .map((s) => ({ blockId: s.blockId, delayMinutes: s.delayMinutes ?? 0, jitterMinutes: s.delayJitterMinutes ?? 0 }));
     }
     steps = steps.filter((s) => !!s.blockId);
     if (steps.length === 0) return reply.status(400).send({ error: 'sequence_empty' });
@@ -251,7 +252,7 @@ export async function sequenceRoutes(app: FastifyInstance): Promise<void> {
       const stepsOut = [];
       for (let idx = 0; idx < steps.length; idx++) {
         const s = steps[idx];
-        const gapMs = stepDelayMs(rules, s.delayMinutes ?? 0, () => 0.5);
+        const gapMs = stepDelayMs(s.delayMinutes ?? 0, s.jitterMinutes ?? 0, () => 0.5);
         t = nextAllowedTime(new Date(t.getTime() + gapMs), rules);
         const block = s.blockId ? blockById.get(s.blockId) ?? null : null;
         const bubbles = await renderBlockBubbles(block, c.id, nickId);

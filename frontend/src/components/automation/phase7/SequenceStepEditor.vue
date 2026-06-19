@@ -21,6 +21,17 @@
             :units="['minute','hour','day']"
             @update:model-value="(v: number) => updateDelay(idx, v)"
           />
+          <!-- 2026-06-19 (gộp Luật 2): jitter ± phút random quanh delay (chống Zalo nghi bot) -->
+          <span class="delay-jitter" title="Random ± số phút này quanh thời gian chờ, để gửi tự nhiên hơn (chống Zalo nghi bot). 0 = gửi đúng giờ.">
+            <span class="delay-prefix">± random</span>
+            <input
+              class="jitter-num"
+              type="number" min="0" max="1440"
+              :value="step.delayJitterMinutes ?? 0"
+              @input="updateJitter(idx, ($event.target as HTMLInputElement).value)"
+            />
+            <span class="delay-prefix">phút</span>
+          </span>
         </div>
       </div>
 
@@ -352,6 +363,13 @@ function updateDelay(idx: number, value: string | number) {
   newSteps[idx] = { ...newSteps[idx], delayMinutes: n };
   emitSteps(newSteps);
 }
+// 2026-06-19 (gộp Luật 2): ± random phút quanh delay của bước này (0..1440).
+function updateJitter(idx: number, value: string | number) {
+  const newSteps = [...props.steps];
+  const n = Math.max(0, Math.min(1440, Math.round(Number(value) || 0)));
+  newSteps[idx] = { ...newSteps[idx], delayJitterMinutes: n };
+  emitSteps(newSteps);
+}
 async function removeStep(idx: number) {
   // Chỉ cho phép xoá step CUỐI — xoá step giữa làm lệch tin cho KH đang chờ delay.
   // Nếu sale muốn restructure, tạo Sequence mới.
@@ -422,6 +440,16 @@ async function removeStep(idx: number) {
   gap: 4px;
   font-size: 12px;
   color: var(--at-body);
+}
+/* 2026-06-19 — jitter ± random phút (gộp Luật 2 vào step) */
+.delay-jitter {
+  display: inline-flex; align-items: center; gap: 3px;
+  margin-left: 6px; padding-left: 8px; border-left: 1px dashed var(--at-hairline);
+  color: var(--at-muted, #6b7280);
+}
+.jitter-num {
+  width: 46px; text-align: center; border: 1px solid var(--at-hairline);
+  border-radius: 6px; padding: 2px 4px; font-size: 12px; font-family: inherit; color: var(--at-body);
 }
 .delay-input {
   width: 56px !important;

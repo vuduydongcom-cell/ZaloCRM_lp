@@ -84,6 +84,7 @@ interface SequenceStepConfig {
   stepId: string;
   blockId: string;
   delayMinutes: number;
+  delayJitterMinutes?: number; // 2026-06-19: ± random phút quanh delayMinutes (chống bot)
   exitCondition?: unknown;
 }
 
@@ -97,7 +98,7 @@ async function loadSequenceSteps(sequenceId: string): Promise<SequenceStepConfig
   const rows = await prisma.sequenceStep.findMany({
     where: { sequenceId },
     orderBy: { stepOrder: 'asc' },
-    select: { id: true, blockId: true, delayMinutes: true, exitCondition: true },
+    select: { id: true, blockId: true, delayMinutes: true, jitterMinutes: true, exitCondition: true },
   });
   if (rows.length > 0) {
     return rows
@@ -106,6 +107,7 @@ async function loadSequenceSteps(sequenceId: string): Promise<SequenceStepConfig
         stepId: r.id,
         blockId: r.blockId as string,
         delayMinutes: r.delayMinutes,
+        delayJitterMinutes: r.jitterMinutes ?? 0,
         exitCondition: r.exitCondition ?? undefined,
       }));
   }
@@ -148,6 +150,7 @@ async function incrCompletedCounter(sequenceId: string): Promise<void> {
 async function enqueueNextStep(
   data: SequenceStepJobData,
   delayMinutes: number,
+  jitterMinutes = 0,
 ): Promise<void> {
   const nextStepIdx = data.stepIdx + 1;
   if (nextStepIdx >= data.totalSteps) {
@@ -162,11 +165,10 @@ async function enqueueNextStep(
   const queue = getSequenceStepQueue();
   const nextJobId = buildSequenceStepJobId(data.triggerId, data.sequenceId, data.contactId, nextStepIdx, data.enrollEpoch ?? 1);
 
-  // FIX code-review #2: LUẬT 2 (sendGap) — delay từ schedule-calculator (rules.sendGap
-  // giây→ngày), fallback step.delayMinutes nếu chưa set. LUẬT 1 (giờ) — dời mốc gửi vào
-  // khung allowedHourRange (nếu rơi ngoài giờ → đầu khung kế). Trước đây cả 2 là dead config.
+  // 2026-06-19: delay bước kế = delayMinutes CỐ ĐỊNH ± jitter (gộp Luật 2 vào step).
+  // LUẬT 1 (giờ) — dời mốc gửi vào khung allowedTimeRange (rơi ngoài giờ → đầu khung kế).
   const rules = (data.runtimeRules ?? undefined) as import('../sequences/types.js').SequenceRuntimeRules | undefined;
-  const baseDelayMs = stepDelayMs(rules, delayMinutes);
+  const baseDelayMs = stepDelayMs(delayMinutes, jitterMinutes);
   const runAt = nextAllowedTime(new Date(Date.now() + baseDelayMs), rules);
   const delayMs = Math.max(0, runAt.getTime() - Date.now());
 
@@ -664,7 +666,7 @@ async function processJob(
   // ── STEP 7: Lazy chain — enqueue step N+1 ──
   const nextStep = steps[stepIdx + 1];
   if (nextStep) {
-    await enqueueNextStep(job.data, nextStep.delayMinutes ?? 60);
+    await enqueueNextStep(job.data, nextStep.delayMinutes ?? 60, nextStep.delayJitterMinutes ?? 0);
   } else {
     await incrCompletedCounter(sequenceId);
     // Fix #6 v2 (2026-06-02): KH này hoàn tất sequence → check xem CÒN KH nào của trigger
@@ -965,11 +967,16 @@ export async function sweepMissingNextSteps(): Promise<{ recovered: number }> {
     });
     if (!outbox) continue;
 
-    // FIX #5: lấy runtimeRules để job recovery cũng đúng luật 1+2 (giống enqueue thường).
+    // FIX #5: lấy runtimeRules để job recovery cũng đúng luật 1+4 (giống enqueue thường).
     const seqRules = await prisma.automationSequence.findUnique({
       where: { id: sequenceId },
       select: { runtimeRules: true },
     });
+
+    // 2026-06-19: recovery dùng cùng công thức — delay ± jitter rồi né khung giờ (luật 1).
+    const recRules = (seqRules?.runtimeRules as Record<string, unknown>) as import('../sequences/types.js').SequenceRuntimeRules | undefined;
+    const recBaseMs = stepDelayMs(steps[nextStepIdx].delayMinutes ?? 60, steps[nextStepIdx].delayJitterMinutes ?? 0);
+    const recRunAt = nextAllowedTime(new Date(Date.now() + recBaseMs), recRules);
 
     await queue.add(
       'sequence-step',
@@ -984,7 +991,7 @@ export async function sweepMissingNextSteps(): Promise<{ recovered: number }> {
         runtimeRules: (seqRules?.runtimeRules as Record<string, unknown>) ?? undefined,
         enrollEpoch: evtEpoch,
       },
-      { jobId: nextJobId, delay: (steps[nextStepIdx].delayMinutes ?? 60) * 60_000 },
+      { jobId: nextJobId, delay: Math.max(0, recRunAt.getTime() - Date.now()) },
     );
 
     await prisma.automationEventLog.create({

@@ -2340,6 +2340,8 @@ model SequenceStep {
   blockId       String?  @map("block_id") // nullable: step có thể chưa pick Block (draft)
   stepOrder     Int      @map("step_order")
   delayMinutes  Int      @default(0) @map("delay_minutes")
+  // 2026-06-19 (gộp Luật 2 vào step) — jitter ± phút random quanh delayMinutes (chống bot). 0 = tắt.
+  jitterMinutes Int      @default(0) @map("jitter_minutes")
   exitCondition Json?    @map("exit_condition") // {type: 'replied'|'clicked'|'timeout', value?}
   createdAt     DateTime @default(now()) @map("created_at")
   updatedAt     DateTime @updatedAt @map("updated_at")
@@ -2446,6 +2448,14 @@ model AutomationTrigger {
   // Default cả 2 = true → Mục tiêu cũ giữ nguyên hành vi.
   followUpStrangerEnabled Boolean   @default(true) @map("follow_up_stranger_enabled")
   followUpFriendEnabled   Boolean   @default(true) @map("follow_up_friend_enabled")
+  // ── Tự đặt tên gợi nhớ (Zalo alias) 2026-06-19 (Anh chốt) ──
+  // changeFriendAlias(alias, friendId=UID) KHÔNG cần friendship → đặt NGAY khi findUser ra
+  // UID trong request_friend, cho TOÀN BỘ tệp có Zalo ("đặt hết"). LUÔN ĐÈ theo mẫu.
+  // aliasTemplate dùng biến render-template (vd {zalo_name} {trigger_project} {income} {phone}).
+  // {zalo_name}=tên Zalo THẬT (CEO chốt, ko phải tên import). {trigger_project}=projectAbbr.
+  autoAliasEnabled        Boolean   @default(false) @map("auto_alias_enabled")
+  aliasTemplate           String?   @map("alias_template") @db.Text
+  projectAbbr             String?   @map("project_abbr")
   // Thông báo nội bộ per-event: { "<eventKey>": { "owner": bool, "manager": bool, "zaloGroup": bool } }
   // eventKey: welcome|thankYou|remind|rejected|reply|reactionPositive|reactionNegative|lead|block|friendAccept|friendReject.
   // owner = Sale phụ trách nick (LÀM THẬT). manager auto org-tree (RBAC M2). zaloGroup = UID nhập Settings.

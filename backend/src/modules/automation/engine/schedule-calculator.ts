@@ -44,20 +44,19 @@ export function sendGapToMs(gap: SendGap | undefined, rand: () => number = Math.
  *
  * @param rand inject random để test (default Math.random).
  */
+// 2026-06-19 (anh chốt: gộp Luật 2 vào step) — delay bước kế = delayMinutes CỐ ĐỊNH ± random
+// trong [-jitter, +jitter] phút (chống Zalo nghi bot). jitter=0 → đúng delayMinutes. Không âm.
+// Bỏ hẳn cơ chế sendGap toàn cục (trước đây ĐÈ delayMinutes — gây sơ đồ bước hiển thị sai).
 export function stepDelayMs(
-  rules: SequenceRuntimeRules | null | undefined,
-  fallbackDelayMinutes: number,
+  delayMinutes: number,
+  jitterMinutes = 0,
   rand: () => number = Math.random,
 ): number {
-  const gap = rules?.sendGap;
-  if (gap) {
-    const ms = sendGapToMs(gap, rand);
-    // sendGap có cấu hình (min/max/value) → dùng kết quả random (kể cả 0 nếu min=max=0).
-    if ((typeof gap.min === 'number' && typeof gap.max === 'number') || (typeof gap.value === 'number' && gap.value > 0)) {
-      return ms;
-    }
-  }
-  return Math.max(0, (fallbackDelayMinutes ?? 0) * MS.minute);
+  const base = Math.max(0, (delayMinutes ?? 0) * MS.minute);
+  const jit = Math.max(0, jitterMinutes ?? 0);
+  if (jit <= 0) return base;
+  const deltaMin = (rand() * 2 - 1) * jit; // [-jit, +jit) phút; rand=0.5 → 0 (điểm giữa cho preview/ETA)
+  return Math.max(0, Math.round(base + deltaMin * MS.minute));
 }
 
 // "HH:mm" → phút-trong-ngày 0..1440. Cho phép "24:00"=1440 (chỉ hợp lệ cho end). Sai → null.
@@ -153,7 +152,7 @@ export function etaCompleteAt(
   // panel. Thực tế mỗi step pick random riêng nên ETA là ước lượng (hiển thị "dự kiến").
   const midRand = () => 0.5;
   for (let i = fromStepIdx + 1; i < steps.length; i++) {
-    const gapMs = stepDelayMs(rules, steps[i].delayMinutes, midRand);
+    const gapMs = stepDelayMs(steps[i].delayMinutes, steps[i].delayJitterMinutes ?? 0, midRand);
     t = new Date(t.getTime() + gapMs);
     t = nextAllowedTime(t, rules);
   }
