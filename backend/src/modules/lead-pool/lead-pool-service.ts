@@ -47,8 +47,39 @@ interface PoolConfig {
   // Sale khác vẫn xin được ngay. Chống spam loop xin-trả-xin lại cùng KH.
   selfReclaimLockDays: number;
   // 2026-05-28 — array template câu chào. Empty → service fallback DEFAULT_GREETING_TEMPLATES.
-  // Placeholders: {anh_chi} {ac} {ten_kh} {ten_em}. Max 10 câu, mỗi câu ≤500 ký tự.
-  greetingTemplates: string[];
+  // 2026-06-19 (C): mỗi câu = {text, styles} (Zalo-native, như Khối) → preview + gửi-thẳng có
+  // màu/đậm. Tương thích ngược: câu cũ lưu string → coi như {text, styles:[]} (text trơn).
+  greetingTemplates: GreetingTemplate[];
+  // 2026-06-19 (D) — pool chỉ lấy lead từ các tệp KH này (customer_list ids). Rỗng = lấy
+  // MỌI tệp có shareable_to_pool=true (hành vi cũ). Chỉ áp khi nguồn 'customer_list' đang bật.
+  sourceListIds: string[];
+}
+
+// 2026-06-19 (C) — câu chào có định dạng (đồng bộ Khối: {st,start,len}).
+export interface GreetingStyle { st: string; start: number; len: number }
+export interface GreetingTemplate { text: string; styles: GreetingStyle[] }
+
+/** Chuẩn hoá 1 template: chấp nhận string cũ HOẶC {text,styles} mới → {text,styles}. */
+function normalizeGreeting(raw: unknown): GreetingTemplate | null {
+  if (typeof raw === 'string') {
+    const t = raw.trim();
+    return t ? { text: t.slice(0, 500), styles: [] } : null;
+  }
+  if (raw && typeof raw === 'object') {
+    const o = raw as { text?: unknown; styles?: unknown };
+    const text = typeof o.text === 'string' ? o.text.trim().slice(0, 500) : '';
+    if (!text) return null;
+    const styles = Array.isArray(o.styles)
+      ? (o.styles as unknown[]).filter((s): s is GreetingStyle =>
+          !!s && typeof (s as any).st === 'string' && typeof (s as any).start === 'number' && typeof (s as any).len === 'number')
+      : [];
+    return { text, styles };
+  }
+  return null;
+}
+function normalizeGreetingList(raw: unknown): GreetingTemplate[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.map(normalizeGreeting).filter((g): g is GreetingTemplate => !!g).slice(0, 10);
 }
 
 // Bounds cho auto-return: 30 phút (rotate nhanh) → 7 ngày (10080 phút)
@@ -60,7 +91,7 @@ const DEFAULT_CONFIG: PoolConfig = {
   maxRequestsPerDay: 10,
   cooldownMinutes: 15,
   forgottenThresholdDays: 30,
-  excludedStatuses: ['hot', 'potential', 'won'],
+  excludedStatuses: [], // 2026-06-19: statusId thật của org (admin chọn); rỗng = không loại trạng thái nào
   autoReturnAfterMinutes: 1440, // 1 ngày
   requirePhoneInPool: true,
   forceNoteBeforeNext: true,
@@ -69,11 +100,11 @@ const DEFAULT_CONFIG: PoolConfig = {
   cooldownAfterNoteDays: 30,
   selfReclaimLockDays: 7,
   greetingTemplates: [], // empty → service dùng DEFAULT_GREETING_TEMPLATES
+  sourceListIds: [], // rỗng = mọi tệp shareable
 };
 
 // Codex MEDIUM-2 fix: validate JSON config — Array.isArray + filter known enum.
 const VALID_SOURCES: LeadSource[] = ['forgotten', 'customer_list', 'external_sync'];
-const VALID_STATUS_KEYS = ['hot', 'potential', 'won', 'interested', 'contacted', 'cold', 'lost', 'dormant', 'silent_30d', 'new'];
 
 function safeStringArray(raw: unknown, fallback: string[], allowed?: string[]): string[] {
   if (!Array.isArray(raw)) return fallback;
@@ -90,7 +121,7 @@ export async function getOrCreateConfig(orgId: string): Promise<PoolConfig> {
       maxRequestsPerDay: Math.max(1, Math.min(100, existing.maxRequestsPerDay)),
       cooldownMinutes: Math.max(0, Math.min(180, existing.cooldownMinutes)),
       forgottenThresholdDays: Math.max(1, Math.min(365, existing.forgottenThresholdDays)),
-      excludedStatuses: safeStringArray(existing.excludedStatuses, DEFAULT_CONFIG.excludedStatuses, VALID_STATUS_KEYS),
+      excludedStatuses: safeStringArray(existing.excludedStatuses, DEFAULT_CONFIG.excludedStatuses),
       autoReturnAfterMinutes: Math.max(AUTO_RETURN_MIN, Math.min(AUTO_RETURN_MAX, existing.autoReturnAfterMinutes)),
       requirePhoneInPool: Boolean(existing.requirePhoneInPool),
       forceNoteBeforeNext: Boolean(existing.forceNoteBeforeNext),
@@ -98,7 +129,8 @@ export async function getOrCreateConfig(orgId: string): Promise<PoolConfig> {
       noteMinLength: Math.max(5, Math.min(500, existing.noteMinLength)),
       cooldownAfterNoteDays: Math.max(0, Math.min(365, existing.cooldownAfterNoteDays)),
       selfReclaimLockDays: Math.max(0, Math.min(365, (existing as any).selfReclaimLockDays ?? 7)),
-      greetingTemplates: safeStringArray(existing.greetingTemplates, []).slice(0, 10).map((s) => s.slice(0, 500)),
+      greetingTemplates: normalizeGreetingList(existing.greetingTemplates),
+      sourceListIds: safeStringArray((existing as any).sourceListIds, []),
     };
   }
   await prisma.leadPoolConfig.create({
@@ -117,6 +149,7 @@ export async function getOrCreateConfig(orgId: string): Promise<PoolConfig> {
       noteMinLength: DEFAULT_CONFIG.noteMinLength,
       cooldownAfterNoteDays: DEFAULT_CONFIG.cooldownAfterNoteDays,
       selfReclaimLockDays: DEFAULT_CONFIG.selfReclaimLockDays,
+      sourceListIds: DEFAULT_CONFIG.sourceListIds,
     },
   });
   return { ...DEFAULT_CONFIG };
@@ -153,20 +186,27 @@ export async function updateConfig(orgId: string, patch: Partial<PoolConfig>): P
     data.selfReclaimLockDays = Math.max(0, Math.min(365, patch.selfReclaimLockDays));
   }
   if (Array.isArray(patch.excludedStatuses)) {
-    data.excludedStatuses = safeStringArray(patch.excludedStatuses, [], VALID_STATUS_KEYS);
+    // 2026-06-19: statusId thật của org (uuid) — không whitelist enum cứng nữa.
+    data.excludedStatuses = safeStringArray(patch.excludedStatuses, []).slice(0, 50);
   }
   if (Array.isArray(patch.enabledSources)) {
     data.enabledSources = safeStringArray(patch.enabledSources, [], VALID_SOURCES);
   }
+  if (Array.isArray(patch.sourceListIds)) {
+    // 2026-06-19 (D): customer_list ids pool được phép lấy. Chỉ giữ id thuộc org này.
+    const ids = safeStringArray(patch.sourceListIds, []).slice(0, 200);
+    if (ids.length > 0) {
+      const owned = await prisma.customerList.findMany({
+        where: { id: { in: ids }, orgId }, select: { id: true },
+      });
+      data.sourceListIds = owned.map((l) => l.id);
+    } else {
+      data.sourceListIds = [];
+    }
+  }
   if (Array.isArray(patch.greetingTemplates)) {
-    // Validate: ≤10 templates, mỗi câu ≤500 ký tự, trim + bỏ rỗng.
-    const cleaned = patch.greetingTemplates
-      .filter((s): s is string => typeof s === 'string')
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0)
-      .slice(0, 10)
-      .map((s) => s.slice(0, 500));
-    data.greetingTemplates = cleaned;
+    // 2026-06-19 (C): chấp nhận string cũ HOẶC {text,styles} mới → chuẩn hoá {text,styles}.
+    data.greetingTemplates = normalizeGreetingList(patch.greetingTemplates);
   }
 
   await prisma.leadPoolConfig.update({ where: { orgId }, data });
@@ -371,7 +411,8 @@ async function queryForgottenCandidates(orgId: string, userId: string, config: P
     WHERE c.org_id = $1
       AND COALESCE(c.last_inbound_at, c.created_at) < $2::timestamp
       AND c.consent_status != 'revoked'
-      AND (c.status IS NULL OR c.status != ALL($3::text[]))
+      -- 2026-06-19: lọc theo status_id (bảng Status thật của org) thay cột status LEGACY.
+      AND (c.status_id IS NULL OR c.status_id != ALL($3::text[]))
       AND (c.assigned_user_id IS NULL OR c.assigned_user_id != $4)
       AND c.merged_into IS NULL
       ${phoneFilter}
@@ -630,7 +671,7 @@ async function buildLeadPayload(
   saleFullName: string | null = null,
   saleUserId: string | null = null,
   autoLookup: AutoLookupResult | null = null,
-  greetingTemplates: string[] = [],
+  greetingTemplates: GreetingTemplate[] = [],
 ) {
   const contact = await prisma.contact.findUnique({
     where: { id: contactId },
@@ -749,16 +790,27 @@ export const DEFAULT_GREETING_TEMPLATES: string[] = [
 async function buildSuggestedOpenings(
   contactId: string,
   assignedNickId: string | null,
-  templates: string[] = [],
-): Promise<string[]> {
-  const list = templates.length > 0 ? templates : DEFAULT_GREETING_TEMPLATES;
+  templates: GreetingTemplate[] = [],
+): Promise<Array<{ text: string; styles: GreetingStyle[] }>> {
+  const list: GreetingTemplate[] = templates.length > 0
+    ? templates
+    : DEFAULT_GREETING_TEMPLATES.map((t) => ({ text: t, styles: [] as GreetingStyle[] }));
   if (!assignedNickId) {
-    // Không có nick → không resolve được per-nick. Trả template thô (sale tự điền tay).
-    return list;
+    // Không có nick → chưa thay biến được, trả text thô (giữ styles cho preview).
+    return list.map((g) => ({ text: g.text, styles: g.styles }));
   }
-  const { renderTemplate } = await import('../automation/blocks/render-template.js');
+  // 2026-06-19 (C): thay biến + DỊCH offset styles theo độ dài giá trị thật (tái dùng máy của Khối).
+  const { renderTemplateDetailed, shiftStylesForRender } = await import('../automation/blocks/render-template.js');
   return Promise.all(
-    list.map((tpl) => renderTemplate(tpl, contactId, assignedNickId).catch(() => tpl)),
+    list.map(async (g) => {
+      try {
+        const { rendered, values } = await renderTemplateDetailed(g.text, contactId, assignedNickId);
+        const shifted = g.styles.length ? (shiftStylesForRender(g.text, g.styles, values) ?? []) : [];
+        return { text: rendered, styles: shifted as GreetingStyle[] };
+      } catch {
+        return { text: g.text, styles: g.styles };
+      }
+    }),
   );
 }
 
@@ -989,7 +1041,7 @@ export async function requestLead(args: { orgId: string; userId: string }) {
         ? queryForgottenCandidates(args.orgId, args.userId, config, 50)
         : Promise.resolve([] as PriorityCandidate[]),
       config.enabledSources.includes('customer_list')
-        ? queryCustomerListCandidatesTx(tx, args.orgId, args.userId, config.cooldownAfterNoteDays, config.selfReclaimLockDays)
+        ? queryCustomerListCandidatesTx(tx, args.orgId, args.userId, config.cooldownAfterNoteDays, config.selfReclaimLockDays, 50, config.sourceListIds)
         : Promise.resolve([] as PriorityCandidate[]),
     ]);
 
@@ -1106,7 +1158,7 @@ export async function requestLead(args: { orgId: string; userId: string }) {
     return null;
   });
 
-  const greetingTemplates = Array.isArray(config.greetingTemplates) ? (config.greetingTemplates as string[]) : [];
+  const greetingTemplates = Array.isArray(config.greetingTemplates) ? config.greetingTemplates : [];
   const payload = await buildLeadPayload(result.contactId, saleUser?.fullName ?? null, args.userId, autoLookup, greetingTemplates);
   if (!payload) {
     // Contact bị xoá trong khoảnh khắc giữa TX và buildPayload — Codex LOW fix.
@@ -1169,6 +1221,7 @@ async function queryCustomerListCandidatesTx(
   cooldownDays = 30,
   selfReclaimLockDays = 7,
   limit = 50,
+  sourceListIds: string[] = [],
 ): Promise<PriorityCandidate[]> {
   const entries = (await tx.$queryRawUnsafe(
     `
@@ -1179,6 +1232,8 @@ async function queryCustomerListCandidatesTx(
     WHERE cl.org_id = $1
       AND cl.shareable_to_pool = true
       AND cl.archived_at IS NULL
+      -- 2026-06-19 (D): nếu admin chọn tệp cụ thể ($6 non-empty) → chỉ lấy các tệp đó.
+      AND ($6::text[] = '{}'::text[] OR cl.id = ANY($6::text[]))
       AND cle.status IN ('validated', 'enriched')
       AND cle.phone_valid = true
       AND (
@@ -1213,7 +1268,7 @@ async function queryCustomerListCandidatesTx(
     ORDER BY days_in_list DESC
     LIMIT $3
     `,
-    orgId, userId, limit, String(cooldownDays), String(selfReclaimLockDays),
+    orgId, userId, limit, String(cooldownDays), String(selfReclaimLockDays), sourceListIds,
   )) as Array<{ contact_id: string | null; phone_e164: string | null; phone_local: string | null; name_raw: string | null; days_in_list: number; entry_id: string }>;
 
   const result: PriorityCandidate[] = [];
@@ -2949,7 +3004,7 @@ export async function getLeadPayload(args: { userId: string; orgId: string; lead
     return null;
   });
 
-  const greetingTemplates = Array.isArray(config.greetingTemplates) ? (config.greetingTemplates as string[]) : [];
+  const greetingTemplates = Array.isArray(config.greetingTemplates) ? config.greetingTemplates : [];
   const payload = await buildLeadPayload(lr.contactId, saleUser?.fullName ?? null, args.userId, autoLookup, greetingTemplates);
   if (!payload) throw new LeadPoolError(404, 'contact_not_found', 'Contact không tồn tại');
 

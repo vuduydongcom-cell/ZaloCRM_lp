@@ -140,20 +140,21 @@
         </div>
       </section>
 
-      <!-- Excluded statuses -->
+      <!-- Excluded statuses — 2026-06-19: load trạng thái THẬT của org (bảng Status) -->
       <section class="lpc-card">
         <h3>🚫 Trạng thái KHÔNG vào pool (giữ cho sale đang chăm)</h3>
-        <p class="lpc-detail">Sale đang chăm KH Nóng/Tiềm năng/Đã chốt được giữ relationship.</p>
+        <p class="lpc-detail">Tick trạng thái nào thì KH đang ở trạng thái đó sẽ KHÔNG bị đưa vào pool (sale đang chăm giữ được). Danh sách lấy đúng trạng thái CRM của tổ chức.</p>
         <div class="lpc-chips">
-          <label v-for="opt in STATUS_OPTIONS" :key="opt.value" class="lpc-chip">
+          <label v-for="st in statusOptions" :key="st.id" class="lpc-chip">
             <input
               type="checkbox"
-              :value="opt.value"
+              :value="st.id"
               v-model="form.excludedStatuses"
               @change="onSave"
             />
-            <span>{{ opt.icon }} {{ opt.label }}</span>
+            <span><span class="lpc-status-dot" :style="{ background: st.color || '#9ca3af' }"></span> {{ st.name }}</span>
           </label>
+          <span v-if="statusOptions.length === 0" class="lpc-detail">Chưa có trạng thái nào — tạo ở Cài đặt → Trạng thái CRM.</span>
         </div>
       </section>
 
@@ -172,6 +173,20 @@
             <span>{{ opt.icon }} {{ opt.label }}</span>
             <small v-if="opt.note">{{ opt.note }}</small>
           </label>
+        </div>
+        <!-- 2026-06-19 (D): chọn TỆP cụ thể khi bật nguồn "Tệp khách hàng" -->
+        <div v-if="form.enabledSources.includes('customer_list')" class="lpc-listpicker">
+          <div class="lpc-listpicker-hd">
+            🎯 Chỉ lấy lead từ các tệp này
+            <small>— KHÔNG chọn tệp nào = lấy TẤT CẢ tệp đang bật "chia sẻ vào pool" (như cũ).</small>
+          </div>
+          <div class="lpc-chips">
+            <label v-for="cl in customerLists" :key="cl.id" class="lpc-chip">
+              <input type="checkbox" :value="cl.id" v-model="form.sourceListIds" @change="onSave" />
+              <span>{{ cl.iconEmoji || '📂' }} {{ cl.name }} <small>({{ cl.totalEntries }} KH)</small></span>
+            </label>
+            <span v-if="customerLists.length === 0" class="lpc-detail">Chưa có tệp khách hàng nào. Tạo ở mục Tệp khách hàng.</span>
+          </div>
         </div>
       </section>
 
@@ -200,11 +215,11 @@
             <!-- Phase FIFO 2026-06-15: editor HTML format (đậm/màu) giống Block/Tin nhắn mẫu. -->
             <RichTextEditor
               :ref="(el: any) => setEditorRef(idx, el)"
-              :model-value="form.greetingTemplates[idx]"
+              :model-value="form.greetingTemplates[idx]?.text || ''"
               :show-toolbar="true"
               :submit-on-enter="false"
               placeholder="Vd: Chào {gender} {crm_first}, em {sale} đây ạ. {gender} còn quan tâm dự án không?"
-              @update:model-value="(v: string) => onTemplateInput(idx, v)"
+              @update:model-value="() => onTemplateInput(idx)"
             />
             <div class="lpc-varbar">
               <span class="lpc-varbar-label"><v-icon size="13">mdi-cursor-text</v-icon> Chèn biến:</span>
@@ -240,19 +255,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, nextTick } from 'vue';
 import { api } from '@/api/index';
 import RichTextEditor from '@/components/chat/rich-text-editor.vue';
 import { TEMPLATE_VARIABLES } from '@/constants/template-variables';
 
-const STATUS_OPTIONS = [
-  { value: 'hot', label: 'Nóng', icon: '🔥' },
-  { value: 'potential', label: 'Tiềm năng', icon: '💎' },
-  { value: 'won', label: 'Đã chốt', icon: '✅' },
-  { value: 'interested', label: 'Quan tâm', icon: '🟡' },
-  { value: 'contacted', label: 'Đã liên hệ', icon: '🔵' },
-  { value: 'cold', label: 'Lạnh', icon: '❄️' },
-];
+// 2026-06-19: trạng thái CRM thật của org (bảng Status) — load động thay hardcode cũ.
+const statusOptions = ref<Array<{ id: string; name: string; color: string | null }>>([]);
+// 2026-06-19 (D): tệp khách hàng để chọn nguồn pool cụ thể.
+const customerLists = ref<Array<{ id: string; name: string; iconEmoji: string | null; totalEntries: number }>>([]);
 
 const SOURCE_OPTIONS = [
   { value: 'forgotten', label: 'Khách bị lãng quên', icon: '💤', disabled: false, note: '' },
@@ -293,7 +304,7 @@ const form = ref({
   maxRequestsPerDay: 10,
   cooldownMinutes: 15,
   forgottenThresholdDays: 30,
-  excludedStatuses: ['hot', 'potential', 'won'] as string[],
+  excludedStatuses: [] as string[],
   autoReturnAfterMinutes: 1440,
   requirePhoneInPool: true,
   forceNoteBeforeNext: true,
@@ -301,8 +312,16 @@ const form = ref({
   noteMinLength: 20,
   cooldownAfterNoteDays: 30,
   selfReclaimLockDays: 7,
-  greetingTemplates: [] as string[],
+  greetingTemplates: [] as Array<{ text: string; styles: Array<{ st: string; start: number; len: number }> }>,
+  sourceListIds: [] as string[],
 });
+
+// Chuẩn hoá template về {text,styles} (chấp nhận string cũ).
+function normGreeting(raw: any): { text: string; styles: any[] } {
+  if (typeof raw === 'string') return { text: raw, styles: [] };
+  if (raw && typeof raw === 'object') return { text: String(raw.text ?? ''), styles: Array.isArray(raw.styles) ? raw.styles : [] };
+  return { text: '', styles: [] };
+}
 
 function applyMinutesPreset(value: number) {
   form.value.autoReturnAfterMinutes = value;
@@ -322,7 +341,7 @@ async function fetchConfig() {
       maxRequestsPerDay: data.maxRequestsPerDay,
       cooldownMinutes: data.cooldownMinutes,
       forgottenThresholdDays: data.forgottenThresholdDays,
-      excludedStatuses: data.excludedStatuses ?? ['hot', 'potential', 'won'],
+      excludedStatuses: Array.isArray(data.excludedStatuses) ? data.excludedStatuses : [],
       autoReturnAfterMinutes: data.autoReturnAfterMinutes ?? 1440,
       requirePhoneInPool: data.requirePhoneInPool ?? true,
       forceNoteBeforeNext: data.forceNoteBeforeNext,
@@ -330,8 +349,15 @@ async function fetchConfig() {
       noteMinLength: data.noteMinLength,
       cooldownAfterNoteDays: data.cooldownAfterNoteDays ?? 30,
       selfReclaimLockDays: data.selfReclaimLockDays ?? 7,
-      greetingTemplates: Array.isArray(data.greetingTemplates) ? data.greetingTemplates : [],
+      greetingTemplates: Array.isArray(data.greetingTemplates) ? data.greetingTemplates.map(normGreeting) : [],
+      sourceListIds: Array.isArray(data.sourceListIds) ? data.sourceListIds : [],
     };
+    // Đổ format có sẵn vào editor sau khi render (styles được khôi phục, không chỉ text trơn).
+    await nextTick();
+    for (const [idxStr, ed] of Object.entries(editorRefs.value)) {
+      const tpl = form.value.greetingTemplates[Number(idxStr)];
+      if (ed?.applyRichPayload && tpl) ed.applyRichPayload({ text: tpl.text, styles: tpl.styles });
+    }
   } catch (err: any) {
     saveError.value = err?.response?.data?.error || 'Load config thất bại';
     saveStatus.value = 'error';
@@ -359,33 +385,43 @@ function setEditorRef(idx: number, el: any) {
   if (el) editorRefs.value[idx] = el; else delete editorRefs.value[idx];
 }
 let tplSaveTimer: ReturnType<typeof setTimeout> | null = null;
-function onTemplateInput(idx: number, val: string) {
-  form.value.greetingTemplates[idx] = val;
+// 2026-06-19 (C): lấy {text,styles} từ editor (giữ định dạng) thay vì chỉ text trơn.
+function syncTemplateFromEditor(idx: number) {
+  const ed = editorRefs.value[idx];
+  if (ed?.getRichPayload) {
+    const p = ed.getRichPayload();
+    form.value.greetingTemplates[idx] = { text: p.text ?? '', styles: Array.isArray(p.styles) ? p.styles : [] };
+  }
+}
+function onTemplateInput(idx: number) {
+  syncTemplateFromEditor(idx);
   // Debounce lưu (RichTextEditor không có @blur như textarea cũ).
   if (tplSaveTimer) clearTimeout(tplSaveTimer);
   tplSaveTimer = setTimeout(() => onSaveTemplates(), 800);
 }
 function insertVar(idx: number, code: string) {
   const ed = editorRefs.value[idx];
-  if (ed?.insertText) { ed.insertText(code); }
-  else { form.value.greetingTemplates[idx] = (form.value.greetingTemplates[idx] || '') + code; }
+  if (ed?.insertText) { ed.insertText(code); syncTemplateFromEditor(idx); }
+  else if (form.value.greetingTemplates[idx]) { form.value.greetingTemplates[idx].text += code; }
 }
 
 function addTemplate() {
   if (form.value.greetingTemplates.length >= 10) return;
-  form.value.greetingTemplates.push('');
+  form.value.greetingTemplates.push({ text: '', styles: [] });
 }
 function removeTemplate(idx: number) {
   form.value.greetingTemplates.splice(idx, 1);
   onSaveTemplates();
 }
 function seedDefaultTemplates() {
-  form.value.greetingTemplates = [...DEFAULT_GREETING_SEEDS];
+  form.value.greetingTemplates = DEFAULT_GREETING_SEEDS.map((t) => ({ text: t, styles: [] as any[] }));
   onSaveTemplates();
 }
 async function onSaveTemplates() {
-  // Trim + bỏ rỗng trước khi gửi BE (BE validate y vậy)
-  const cleaned = form.value.greetingTemplates.map((s) => s.trim()).filter((s) => s.length > 0);
+  // Trim + bỏ câu rỗng trước khi gửi BE (BE chuẩn hoá y vậy).
+  const cleaned = form.value.greetingTemplates
+    .map((g) => ({ text: (g.text || '').trim(), styles: g.styles || [] }))
+    .filter((g) => g.text.length > 0);
   saveStatus.value = '';
   try {
     await api.patch('/lead-pool/config', { greetingTemplates: cleaned });
@@ -398,7 +434,28 @@ async function onSaveTemplates() {
   }
 }
 
-onMounted(fetchConfig);
+// 2026-06-19 (B): load trạng thái CRM thật của org.
+async function fetchStatuses() {
+  try {
+    const { data } = await api.get('/settings/statuses');
+    statusOptions.value = (data.statuses ?? []).map((s: any) => ({ id: s.id, name: s.name, color: s.color ?? null }));
+  } catch { statusOptions.value = []; }
+}
+// 2026-06-19 (D): load tệp khách hàng (cho picker nguồn pool).
+async function fetchCustomerLists() {
+  try {
+    const { data } = await api.get('/automation/broadcasts/helpers/customer-lists');
+    customerLists.value = (data.lists ?? []).map((l: any) => ({
+      id: l.id, name: l.name, iconEmoji: l.iconEmoji ?? null, totalEntries: l.totalEntries ?? 0,
+    }));
+  } catch { customerLists.value = []; }
+}
+
+onMounted(() => {
+  void fetchConfig();
+  void fetchStatuses();
+  void fetchCustomerLists();
+});
 </script>
 
 <style scoped>
@@ -492,6 +549,11 @@ onMounted(fetchConfig);
 .lpc-chip input:checked ~ span { font-weight: 700; }
 .lpc-chip:has(input:checked) { border-color: #5E6AD2; background: #EEF0FF; }
 .lpc-chip small { color: #94A3B8; font-style: italic; margin-left: 4px; }
+/* 2026-06-19 — chấm màu trạng thái + picker tệp nguồn pool */
+.lpc-status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+.lpc-listpicker { margin-top: 12px; padding-top: 12px; border-top: 1px dashed #E2E8F0; }
+.lpc-listpicker-hd { font-size: 12.5px; font-weight: 600; color: #334155; margin-bottom: 8px; }
+.lpc-listpicker-hd small { font-weight: 400; color: #94A3B8; }
 
 .lpc-toast {
   position: fixed; bottom: 24px; right: 24px;
