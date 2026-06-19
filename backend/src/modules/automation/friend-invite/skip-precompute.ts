@@ -9,6 +9,7 @@
 
 import { prisma } from '../../../shared/database/prisma-client.js';
 import { logger } from '../../../shared/utils/logger.js';
+import { logEvent } from './event-log-service.js';
 
 export interface FriendInviteSegmentSpec {
   kind: 'customer_list_pool';
@@ -155,6 +156,34 @@ export async function precomputeAndSeedPool(input: {
       `skipRecency=${result.skippedRecency} skipStatus=${result.skippedStatus} ` +
       `skipNoZalo=${result.skippedNoZalo} total=${result.totalEntries} rawUpdated=${rawUpdateResult}`,
   );
+
+  // 2026-06-19 (Anh báo: log trống → tưởng treo). Ghi 1 sự kiện "Quét tệp" vào LOG TAB
+  // để anh thấy luồng đã chạy + VÌ SAO bỏ qua (luồng pass qua khách bị bỏ qua, không treo).
+  const parts: string[] = [];
+  if (result.skippedRecency) parts.push(`${result.skippedRecency} đã liên hệ gần đây`);
+  if (result.skippedStatus) parts.push(`${result.skippedStatus} trạng thái bị loại`);
+  if (result.skippedNoZalo) parts.push(`${result.skippedNoZalo} không có Zalo`);
+  if (result.skippedFriendCap) parts.push(`${result.skippedFriendCap} quá hạn mức bạn`);
+  const skippedTotal = result.totalEntries - result.queuedForPickup;
+  const summary =
+    `Quét tệp: ${result.totalEntries} khách — ${result.queuedForPickup} sẵn sàng gửi` +
+    (skippedTotal > 0 ? `, bỏ qua ${skippedTotal} (${parts.join(', ')})` : '') +
+    (result.queuedForPickup === 0 ? '. Không có khách để gửi → hoàn thành ngay.' : '');
+  void logEvent({
+    orgId,
+    triggerId,
+    eventType: 'pool_scan',
+    eventPriority: result.queuedForPickup === 0 && skippedTotal > 0 ? 'warning' : 'info',
+    summary,
+    metadata: {
+      total: result.totalEntries,
+      queued: result.queuedForPickup,
+      skippedRecency: result.skippedRecency,
+      skippedStatus: result.skippedStatus,
+      skippedNoZalo: result.skippedNoZalo,
+      skippedFriendCap: result.skippedFriendCap,
+    },
+  });
 
   return result;
 }

@@ -23,6 +23,7 @@ import {
   getOrCreateConfig,
   updateConfig,
 } from './lead-pool-service.js';
+import { previewLeadAlias, setLeadAlias, LeadAliasError } from './lead-pool-alias.js';
 
 function handle(err: unknown, reply: FastifyReply) {
   if (err instanceof LeadPoolError) {
@@ -52,6 +53,20 @@ export async function leadPoolRoutes(app: FastifyInstance): Promise<void> {
     try {
       return await requestLead({ orgId: user.orgId, userId: user.id });
     } catch (err) {
+      return handle(err, reply);
+    }
+  });
+
+  // "Đặt tên gợi nhớ thông minh" 2026-06-19 — preview (apply=false) hoặc đặt (apply=true).
+  app.post('/api/v1/lead-pool/alias', async (request: FastifyRequest, reply: FastifyReply) => {
+    const user = request.user!;
+    const body = (request.body ?? {}) as { contactId?: string; nickId?: string | null; template?: string; apply?: boolean };
+    if (!body.contactId) return reply.status(400).send({ error: 'contactId là bắt buộc' });
+    try {
+      const a = { orgId: user.orgId, userId: user.id, contactId: body.contactId, nickId: body.nickId ?? null, template: body.template };
+      return body.apply ? await setLeadAlias(a) : await previewLeadAlias(a);
+    } catch (err) {
+      if (err instanceof LeadAliasError) return reply.status(err.statusCode).send({ error: err.message });
       return handle(err, reply);
     }
   });

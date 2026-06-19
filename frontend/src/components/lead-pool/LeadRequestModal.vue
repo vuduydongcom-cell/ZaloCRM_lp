@@ -131,6 +131,29 @@
           </div>
         </div>
 
+        <!-- Đặt tên gợi nhớ thông minh 2026-06-19 (Anh chốt) -->
+        <div v-if="directChatNickId" class="lrm-alias">
+          <div class="lrm-alias-head">
+            <span class="lrm-alias-title">💡 Đặt tên gợi nhớ thông minh</span>
+            <button type="button" class="lrm-alias-suggest" :disabled="aliasLoading" @click="loadAliasPreview">
+              {{ aliasLoading ? '⏳' : 'Gợi ý' }}
+            </button>
+          </div>
+          <div class="lrm-alias-row">
+            <input
+              v-model="aliasText"
+              maxlength="60"
+              class="lrm-alias-input"
+              placeholder="Bấm Gợi ý → Giới tính + Tên + SĐT + Ngày + Trạng thái"
+            />
+            <button type="button" class="lrm-alias-apply" :disabled="aliasLoading || !aliasText.trim()" @click="applyAlias">
+              {{ aliasApplied ? '✓ Đã đặt' : 'Đặt tên này' }}
+            </button>
+          </div>
+          <AliasVarPicker @insert="insertLeadAliasVar" />
+          <div v-if="aliasMsg" class="lrm-alias-msg" :class="{ 'is-err': aliasErr }">{{ aliasMsg }}</div>
+        </div>
+
         <!-- Suggestion 1 dòng + copy + gửi thẳng (2026-06-19: render màu/đậm) -->
         <div v-if="primarySuggestion.text" class="lrm-suggestion">
           <span class="lrm-suggestion-icon">💡</span>
@@ -421,6 +444,7 @@
 import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { api } from '@/api/index';
+import AliasVarPicker from '@/components/AliasVarPicker.vue';
 import { applyRichFormat } from '@/composables/use-rich-format';
 import { useLeadPool, type LeadPayload } from '@/composables/use-lead-pool';
 
@@ -778,6 +802,50 @@ function resolveDirectChatNickId(): string | null {
 
 // 2026-06-19 (C): nick id sẵn sàng để gửi thẳng câu chào (computed cho template).
 const directChatNickId = computed<string | null>(() => resolveDirectChatNickId());
+
+// ── Đặt tên gợi nhớ thông minh 2026-06-19 (Anh chốt) ──
+// Sale bấm "Gợi ý" → preview alias theo mẫu (Giới tính + Tên + SĐT + Ngày + Trạng thái);
+// sửa được rồi "Đặt tên này" → set lên Zalo qua nick đang dùng.
+const aliasText = ref('');
+const aliasLoading = ref(false);
+const aliasApplied = ref(false);
+const aliasMsg = ref('');
+const aliasErr = ref(false);
+function aliasReasonText(r?: string): string {
+  if (r === 'no_uid' || r === 'no_zalo_nick_for_contact') return 'Chưa tìm thấy Zalo của KH qua nick — mở chat/đổi nick trước.';
+  if (r === 'unchanged') return 'Tên gợi nhớ đã giống mẫu, không cần đổi.';
+  if (r === 'rate_limited') return 'Zalo đang giới hạn thao tác — thử lại sau ít phút.';
+  if (r === 'empty') return 'Mẫu rỗng — nhập tên.';
+  return 'Không đặt được tên gợi nhớ.';
+}
+async function loadAliasPreview(): Promise<void> {
+  const cid = props.lead?.contact?.id;
+  if (!cid) return;
+  aliasLoading.value = true; aliasErr.value = false; aliasMsg.value = ''; aliasApplied.value = false;
+  try {
+    const { data } = await api.post('/lead-pool/alias', { contactId: cid, nickId: directChatNickId.value, apply: false });
+    aliasText.value = data?.alias ?? '';
+    if (!data?.hasUid) { aliasErr.value = true; aliasMsg.value = 'Chưa tìm thấy Zalo của KH qua nick — mở chat/đổi nick trước rồi Gợi ý lại.'; }
+  } catch (e: any) {
+    aliasErr.value = true; aliasMsg.value = e?.response?.data?.error ?? 'Không tạo được gợi ý.';
+  } finally { aliasLoading.value = false; }
+}
+function insertLeadAliasVar(token: string): void {
+  const cur = aliasText.value ?? '';
+  aliasText.value = (cur && !cur.endsWith(' ') ? cur + ' ' : cur) + token;
+}
+async function applyAlias(): Promise<void> {
+  const cid = props.lead?.contact?.id;
+  if (!cid || !aliasText.value.trim()) return;
+  aliasLoading.value = true; aliasErr.value = false; aliasMsg.value = '';
+  try {
+    const { data } = await api.post('/lead-pool/alias', { contactId: cid, nickId: directChatNickId.value, template: aliasText.value.trim(), apply: true });
+    if (data?.ok) { aliasApplied.value = true; aliasErr.value = false; aliasMsg.value = `✓ Đã đặt tên gợi nhớ: ${data.alias}`; }
+    else { aliasErr.value = true; aliasMsg.value = aliasReasonText(data?.reason); }
+  } catch (e: any) {
+    aliasErr.value = true; aliasMsg.value = e?.response?.data?.error ?? 'Đặt tên thất bại.';
+  } finally { aliasLoading.value = false; }
+}
 // Tên nick để hiển thị trên nút "Mở chat Zalo" — null = cần popup chọn
 const directChatNickName = computed<string | null>(() => {
   if (!props.lead?.hasZaloFromMyNick) return null;
@@ -1297,4 +1365,20 @@ onBeforeUnmount(() => {
 .sss-empty-btn.primary:hover:not(:disabled) { background: #4F46E5; }
 .sss-empty-btn:disabled { opacity: .5; cursor: not-allowed; }
 .sss-error { font-size: 12.5px; color: #c0291f; margin-top: 12px; text-align: center; }
+
+/* Đặt tên gợi nhớ thông minh 2026-06-19 */
+.lrm-alias { margin-top: 12px; border: 1px solid var(--line, #e7eaf0); border-radius: 10px; padding: 10px 12px; background: var(--surface-2, #f7f9fc); }
+.lrm-alias-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.lrm-alias-title { font-size: 12.5px; font-weight: 700; color: var(--ink, #141a24); }
+.lrm-alias-suggest { background: #fff; border: 1px solid #1786be; color: #1786be; border-radius: 7px; padding: 5px 12px; font-size: 12px; font-weight: 700; cursor: pointer; font-family: inherit; }
+.lrm-alias-suggest:hover:not(:disabled) { background: #eaf4fb; }
+.lrm-alias-suggest:disabled { opacity: .5; cursor: not-allowed; }
+.lrm-alias-row { display: flex; gap: 8px; align-items: center; }
+.lrm-alias-input { flex: 1; min-width: 0; border: 1px solid var(--line, #d8dde7); border-radius: 7px; padding: 7px 10px; font-size: 13px; font-family: inherit; color: var(--ink, #141a24); }
+.lrm-alias-input:focus { outline: none; border-color: #1786be; }
+.lrm-alias-apply { background: #1786be; color: #fff; border: none; border-radius: 7px; padding: 7px 14px; font-size: 12.5px; font-weight: 700; cursor: pointer; font-family: inherit; flex-shrink: 0; transition: background .15s; }
+.lrm-alias-apply:hover:not(:disabled) { background: #126699; }
+.lrm-alias-apply:disabled { opacity: .5; cursor: not-allowed; }
+.lrm-alias-msg { margin-top: 7px; font-size: 12px; color: #0e7a4f; }
+.lrm-alias-msg.is-err { color: #c0291f; }
 </style>

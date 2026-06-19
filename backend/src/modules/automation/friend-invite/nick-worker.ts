@@ -25,6 +25,7 @@ import { applyFriendTransition } from '../../zalo/friend-event-handler.js';
 import { nickWorkerLockKey } from './fnv1a.js';
 import { claimNextEntry, markEntrySent, releaseEntryFailed } from './pool-query.js';
 import { logEvent } from './event-log-service.js';
+import { setContactAlias } from '../blocks/auto-alias-service.js';
 import { checkMultiNickThreshold } from '../queues/worker-guards.js';
 import { getBullMQRedis } from '../queues/redis-connection.js';
 // Observability "vì sao không gửi" 2026-06-18 — nhãn lý do (T6 hết lượt kết bạn) + ghi blocker.
@@ -78,6 +79,50 @@ async function logFriendQuotaExhausted(
     }
   } catch (err) {
     logger.warn(`[nick-worker] logFriendQuotaExhausted failed nick=${nickId}: ${(err as Error).message}`);
+  }
+}
+
+// 2026-06-19 (Anh chốt — Observability "vì sao chưa gửi"): ghi 1 dòng log NGƯỜI DÙNG cho
+// các Mục tiêu của nick NÀY còn khách queued, nêu LÝ DO lời mời chưa gửi (ngoài giờ / nick
+// rớt / đang chờ nhịp gửi) → hết cảnh "luồng đứng im, log trống = tưởng treo".
+// Chống flood: Redis SET NX per (nick × trigger × category), TTL ngắn → 1 đợt chặn = 1 dòng.
+async function logFriendInviteBlock(
+  nickId: string,
+  orgId: string,
+  reason: string,
+  nickName: string | null,
+  ttlSec: number,
+): Promise<void> {
+  try {
+    const rows = await prisma.$queryRaw<Array<{ trigger_id: string }>>`
+      SELECT DISTINCT q.trigger_id
+      FROM trigger_queue_entries q
+      JOIN automation_triggers t ON t.id = q.trigger_id
+      WHERE q.org_id = ${orgId} AND q.queue_status = 'queued_for_pickup'
+        AND t.state = 'active'
+        AND (t.segment_spec->'nickIds')::jsonb @> to_jsonb(${nickId}::text)
+      LIMIT 50
+    `;
+    if (rows.length === 0) return;
+    const redis = getBullMQRedis();
+    const info = resolveBlockReason(reason);
+    for (const r of rows) {
+      if (!r.trigger_id) continue;
+      const ok = await redis.set(`evtlog:fiblock:${nickId}:${r.trigger_id}:${info.category}`, '1', 'EX', ttlSec, 'NX');
+      if (ok !== 'OK') continue; // đợt chặn này đã ghi rồi
+      void logEvent({
+        orgId,
+        triggerId: r.trigger_id,
+        nickId,
+        eventType: 'friend_invite_blocked',
+        eventPriority: 'warning',
+        summary: nickName ? `${info.label} (nick ${nickName})` : info.label,
+        category: info.category,
+        metadata: { reason, hint: info.hint },
+      });
+    }
+  } catch (err) {
+    logger.warn(`[nick-worker] logFriendInviteBlock failed nick=${nickId} reason=${reason}: ${(err as Error).message}`);
   }
 }
 
@@ -410,6 +455,8 @@ async function runTick(nickId: string): Promise<void> {
       : [6, 22];
   if (!isWithinWorkingHours(effectiveRange)) {
     logger.debug(`[nick-worker] ${nickId} skip tick: outside working hours ${effectiveRange[0]}-${effectiveRange[1]}h VN`);
+    // Observability 2026-06-19: ghi log "ngoài giờ gửi" cho Mục tiêu còn khách chờ (chống "treo").
+    void logFriendInviteBlock(nickId, worker.orgId, 'outside_hour_window', null, 1800);
     return;
   }
 
@@ -425,6 +472,10 @@ async function runTick(nickId: string): Promise<void> {
   }
   if (nick.status !== 'connected') {
     logger.debug(`[nick-worker] ${nickId} status=${nick.status}, skip tick`);
+    // Observability 2026-06-19: ghi log "nick chưa online / chờ QR" cho Mục tiêu còn khách chờ.
+    const reason = nick.status === 'qr_pending' ? 'nick_qr_pending'
+      : nick.status === 'connecting' ? 'nick_connecting' : 'nick_offline';
+    void logFriendInviteBlock(nickId, worker.orgId, reason, nick.displayName ?? null, 1800);
     return;
   }
   if (worker.todayCount >= nick.dailyFriendAddCap) {
@@ -468,6 +519,10 @@ async function runTick(nickId: string): Promise<void> {
         multiNickThreshold: true,
         createdById: true,
         orgId: true,
+        // Tự đặt tên gợi nhớ 2026-06-19 — đọc LIVE (toggle/mẫu mới nhất, không bị frozen).
+        autoAliasEnabled: true,
+        aliasTemplate: true,
+        projectAbbr: true,
       },
     });
     if (!trigger) {
@@ -664,6 +719,21 @@ async function runTick(nickId: string): Promise<void> {
           } catch (err) {
             logger.warn(`[nick-worker] applyFriendTransition failed entry=${entry.id}:`, err);
           }
+        }
+        // Tự đặt tên gợi nhớ 2026-06-19 — nhánh "đã là bạn" cũng đặt (đặt hết cả tệp).
+        if (trigger.autoAliasEnabled && trigger.aliasTemplate && resolvedUid) {
+          void setContactAlias({
+            orgId: worker.orgId,
+            contactId,
+            nickId,
+            template: trigger.aliasTemplate,
+            triggerProject: trigger.projectAbbr ?? undefined,
+            uid: resolvedUid,
+            zaloName: resolvedDisplayName ?? undefined,
+            phone: entry.phoneLocal ?? entry.phoneE164 ?? undefined,
+            triggerId: entry.triggerId,
+            actorSystemSource: 'auto_alias_trigger',
+          }).catch((err) => logger.warn(`[nick-worker] setContactAlias (already-friend) failed entry=${entry.id}:`, err));
         }
         await markEntrySent({
           entryId: entry.id,
@@ -878,6 +948,27 @@ async function runTick(nickId: string): Promise<void> {
         logger.warn(`[nick-worker] applyFriendTransition failed entry=${entry.id}:`, err);
       }
     }
+
+    // ── Tự đặt tên gợi nhớ 2026-06-19 (Anh chốt) — đặt alias cho cả tệp khi có UID ──
+    // changeFriendAlias chỉ cần UID (KHÔNG cần khách accept). Tên Zalo THẬT live =
+    // resolvedDisplayName. Config đọc LIVE từ trigger (toggle/mẫu mới nhất). Fire-and-forget.
+    // Friend row vừa upsert ở applyFriendTransition trên → setContactAlias đọc/ghi aliasInNick
+    // (log "đặt mới" vs "cũ → mới") được.
+    if (trigger.autoAliasEnabled && trigger.aliasTemplate && resolvedUid) {
+      void setContactAlias({
+        orgId: worker.orgId,
+        contactId,
+        nickId,
+        template: trigger.aliasTemplate,
+        triggerProject: trigger.projectAbbr ?? undefined,
+        uid: resolvedUid,
+        zaloName: resolvedDisplayName ?? undefined,
+        phone: entry.phoneLocal ?? entry.phoneE164 ?? undefined,
+        triggerId: entry.triggerId,
+        actorSystemSource: 'auto_alias_trigger',
+      }).catch((err) => logger.warn(`[nick-worker] setContactAlias failed entry=${entry.id}:`, err));
+    }
+
     await markEntrySent({
       entryId: entry.id,
       triggerId: entry.triggerId,
@@ -936,6 +1027,11 @@ async function runTick(nickId: string): Promise<void> {
         phoneE164: entry.phoneE164,
       },
     });
+
+    // Observability 2026-06-19 (Anh chốt): vừa gửi 1 lời mời — các Mục tiêu của nick này CÒN
+    // khách chờ (cùng/khác Mục tiêu, xếp hàng theo nhịp chống-ban) → ghi "đang chờ nhịp gửi"
+    // (deduped 30') để anh thấy luồng đang chờ, KHÔNG phải treo. Hết khách queued → tự bỏ qua.
+    void logFriendInviteBlock(nickId, worker.orgId, 'nick_gap', nick.displayName ?? null, 1800);
   } finally {
     worker.isBusy = false;
   }

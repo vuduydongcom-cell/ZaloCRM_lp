@@ -15,6 +15,7 @@ import { prisma } from '../../../../shared/database/prisma-client.js';
 import { logger } from '../../../../shared/utils/logger.js';
 import { zaloOps } from '../../../../shared/zalo-operations.js';
 import { markFriendRequestSent } from '../../../zalo/friend-event-handler.js';
+import { setContactAlias } from '../../blocks/auto-alias-service.js';
 import type { ActionContext, ActionResult } from '../types.js';
 
 export async function requestFriendHandler(ctx: ActionContext): Promise<ActionResult> {
@@ -102,6 +103,31 @@ export async function requestFriendHandler(ctx: ActionContext): Promise<ActionRe
       errorMessage: 'findUser returned no uid',
       retryable: false,
     };
+  }
+
+  // ── Tự đặt tên gợi nhớ 2026-06-19 (Anh chốt) ──
+  // changeFriendAlias chỉ cần UID (không cần friendship) → đặt NGAY khi findUser ra UID,
+  // cho TOÀN BỘ tệp có Zalo ("đặt hết"), trước cả các nhánh already_friend/pending/gửi mới.
+  // {zalo_name} = tên Zalo THẬT live từ findUser (KHÔNG phải tên import). Fire-and-forget.
+  const aliasCfg = (ctx.rulesSnapshot?.aliasCfg ?? null) as
+    | { enabled?: boolean; template?: string; project?: string; triggerId?: string }
+    | null;
+  if (aliasCfg?.enabled && aliasCfg.template && ctx.assignedNickId) {
+    const zaloName = String(
+      (lookupResult as Record<string, unknown>)?.display_name ||
+      (lookupResult as Record<string, unknown>)?.zalo_name || '',
+    );
+    void setContactAlias({
+      orgId: ctx.orgId,
+      contactId: ctx.contactId,
+      nickId: ctx.assignedNickId,
+      template: aliasCfg.template,
+      triggerProject: aliasCfg.project,
+      uid,
+      zaloName,
+      triggerId: aliasCfg.triggerId,
+      actorSystemSource: 'auto_alias_trigger',
+    }).catch((err) => logger.warn('[request-friend] setContactAlias failed (non-fatal):', err));
   }
 
   // Step 2.5: check if already friend (avoid wasted attempt + skip_reason hint)

@@ -20,6 +20,7 @@ export interface ClaimedEntry {
   id: string;
   contactId: string | null;
   phoneE164: string | null;
+  phoneLocal: string | null; // "0778144100" — dạng VN, dùng cho alias {phone} (Anh chốt mặc định 2026-06-19)
   phoneRaw: string;
   nameRaw: string | null;
   triggerId: string;
@@ -51,6 +52,7 @@ export async function claimNextEntry(nickId: string, orgId: string): Promise<Cla
       id: string;
       contact_id: string | null;
       phone_e164: string | null;
+      phone_local: string | null;
       phone_raw: string;
       name_raw: string | null;
       trigger_id: string;
@@ -83,6 +85,7 @@ export async function claimNextEntry(nickId: string, orgId: string): Promise<Cla
       customer_list_entry_id AS id,
       contact_id,
       (SELECT phone_e164 FROM customer_list_entries WHERE id = trigger_queue_entries.customer_list_entry_id) AS phone_e164,
+      (SELECT phone_local FROM customer_list_entries WHERE id = trigger_queue_entries.customer_list_entry_id) AS phone_local,
       (SELECT phone_raw  FROM customer_list_entries WHERE id = trigger_queue_entries.customer_list_entry_id) AS phone_raw,
       (SELECT name_raw   FROM customer_list_entries WHERE id = trigger_queue_entries.customer_list_entry_id) AS name_raw,
       trigger_id,
@@ -95,6 +98,7 @@ export async function claimNextEntry(nickId: string, orgId: string): Promise<Cla
     id: r.id,
     contactId: r.contact_id,
     phoneE164: r.phone_e164,
+    phoneLocal: r.phone_local,
     phoneRaw: r.phone_raw,
     nameRaw: r.name_raw,
     triggerId: r.trigger_id,

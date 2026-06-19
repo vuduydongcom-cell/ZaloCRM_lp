@@ -421,6 +421,10 @@ export async function friendInviteRoutes(app: FastifyInstance): Promise<void> {
       // #1 2026-06-06 — 2 công tắc bám đuổi theo trạng thái kết bạn.
       followUpStrangerEnabled?: boolean;
       followUpFriendEnabled?: boolean;
+      // Tự đặt tên gợi nhớ 2026-06-19 — bật + mẫu + viết tắt dự án ({trigger_project}).
+      autoAliasEnabled?: boolean;
+      aliasTemplate?: string | null;
+      projectAbbr?: string | null;
       notifyChannels?: Record<string, { owner?: boolean; manager?: boolean; zaloGroup?: boolean }>;
       // CareSession 2026-06-07 — điều kiện đóng phiên per-Mục-tiêu.
       closeConditions?: { onStatusIds?: string[]; onFriendTagIds?: string[]; onCrmTagIds?: string[]; silenceDays?: number };
@@ -730,6 +734,10 @@ export async function friendInviteRoutes(app: FastifyInstance): Promise<void> {
         // #1 2026-06-06 — 2 công tắc bám đuổi (default bật = hành vi cũ).
         followUpStrangerEnabled: body.followUpStrangerEnabled ?? true,
         followUpFriendEnabled: body.followUpFriendEnabled ?? true,
+        // Tự đặt tên gợi nhớ 2026-06-19 (Anh chốt) — đặt alias cho cả tệp khi có UID ("đặt hết").
+        autoAliasEnabled: body.autoAliasEnabled ?? false,
+        aliasTemplate: body.aliasTemplate?.trim() || null,
+        projectAbbr: body.projectAbbr?.trim() || null,
         notifyChannels: (body.notifyChannels && typeof body.notifyChannels === 'object'
           ? body.notifyChannels
           : undefined) as object | undefined,
@@ -1828,6 +1836,10 @@ export async function friendInviteRoutes(app: FastifyInstance): Promise<void> {
         // #1 2026-06-06 — 2 công tắc bám đuổi cho edit prefill.
         followUpStrangerEnabled: true,
         followUpFriendEnabled: true,
+        // Tự đặt tên gợi nhớ 2026-06-19 — prefill khi edit.
+        autoAliasEnabled: true,
+        aliasTemplate: true,
+        projectAbbr: true,
         notifyChannels: true,
         sendHourStart: true,
         sendHourEnd: true,
@@ -1881,6 +1893,10 @@ export async function friendInviteRoutes(app: FastifyInstance): Promise<void> {
       // #1 2026-06-06 — 2 công tắc bám đuổi để UI hiển thị lại.
       followUpStrangerEnabled: trigger.followUpStrangerEnabled,
       followUpFriendEnabled: trigger.followUpFriendEnabled,
+      // Tự đặt tên gợi nhớ 2026-06-19 — UI prefill.
+      autoAliasEnabled: trigger.autoAliasEnabled,
+      aliasTemplate: trigger.aliasTemplate,
+      projectAbbr: trigger.projectAbbr,
       notifyChannels: trigger.notifyChannels ?? null,
       scheduledAt: trigger.scheduledAt ? trigger.scheduledAt.toISOString() : null,
       safetyRules: {
@@ -1934,6 +1950,10 @@ export async function friendInviteRoutes(app: FastifyInstance): Promise<void> {
       // #1 2026-06-06 — 2 công tắc bám đuổi (edit).
       followUpStrangerEnabled?: boolean;
       followUpFriendEnabled?: boolean;
+      // Tự đặt tên gợi nhớ 2026-06-19 (edit).
+      autoAliasEnabled?: boolean;
+      aliasTemplate?: string | null;
+      projectAbbr?: string | null;
       notifyChannels?: Record<string, { owner?: boolean; manager?: boolean; zaloGroup?: boolean }>;
       closeConditions?: { onStatusIds?: string[]; onFriendTagIds?: string[]; onCrmTagIds?: string[]; silenceDays?: number };
       safetyRules?: {
@@ -2051,6 +2071,10 @@ export async function friendInviteRoutes(app: FastifyInstance): Promise<void> {
     // #1 2026-06-06 — 2 công tắc bám đuổi.
     if (body.followUpStrangerEnabled !== undefined) data.followUpStrangerEnabled = !!body.followUpStrangerEnabled;
     if (body.followUpFriendEnabled !== undefined) data.followUpFriendEnabled = !!body.followUpFriendEnabled;
+    // Tự đặt tên gợi nhớ 2026-06-19 (edit).
+    if (body.autoAliasEnabled !== undefined) data.autoAliasEnabled = !!body.autoAliasEnabled;
+    if (body.aliasTemplate !== undefined) data.aliasTemplate = body.aliasTemplate?.trim() || null;
+    if (body.projectAbbr !== undefined) data.projectAbbr = body.projectAbbr?.trim() || null;
     if (body.notifyChannels !== undefined && body.notifyChannels && typeof body.notifyChannels === 'object')
       data.notifyChannels = body.notifyChannels;
     // CareSession 2026-06-07 — điều kiện đóng phiên (edit).

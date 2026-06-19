@@ -466,6 +466,29 @@
             </label>
           </div>
 
+          <!-- Tự đặt tên gợi nhớ 2026-06-19 (Anh chốt) — đặt alias Zalo cho cả tệp khi có UID -->
+          <div class="followup-mode" style="margin-top: 12px;">
+            <label class="fum-label" style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+              <input type="checkbox" v-model="form.autoAliasEnabled" />
+              <span>Tự đặt tên gợi nhớ Zalo cho khách trong tệp</span>
+            </label>
+            <div class="fum-help" style="margin-left:2px;">
+              Khi tìm thấy Zalo của khách (theo SĐT), tự đặt "tên gợi nhớ" theo mẫu — đặt cho cả tệp, KHÔNG cần chờ khách đồng ý kết bạn.
+            </div>
+            <div v-if="form.autoAliasEnabled" style="margin-top:10px; display:grid; gap:10px;">
+              <div>
+                <div class="fum-label" style="font-size:13px;">Viết tắt dự án <span style="font-weight:400; color:var(--ink-3,#6b7488);">→ biến {trigger_project}</span></div>
+                <input type="text" v-model="form.projectAbbr" class="text-input" maxlength="40" placeholder="VD: VHG, EBV…" style="width:200px;" />
+              </div>
+              <div>
+                <div class="fum-label" style="font-size:13px;">Mẫu tên gợi nhớ</div>
+                <input type="text" v-model="form.aliasTemplate" class="text-input" maxlength="120" style="width:100%; max-width:460px;" />
+                <div class="safety-help" style="margin-top:4px;">Ô nào trống tự bỏ. Bấm "Xem biến" để chèn nhanh ~36 biến.</div>
+                <AliasVarPicker @insert="insertAliasVar" />
+              </div>
+            </div>
+          </div>
+
           <div class="radio-group">
             <div
               class="radio-row"
@@ -1073,6 +1096,7 @@ import { api } from '@/api';
 import TimeAmountInput from '@/components/automation/TimeAmountInput.vue';
 import NotifyOwnerBox from '@/components/automation/NotifyOwnerBox.vue';
 import SequenceFlowMap, { type FlowStep, type FlowCategory } from '@/components/automation/SequenceFlowMap.vue';
+import AliasVarPicker from '@/components/AliasVarPicker.vue';
 import { ACTION_TYPE_LABELS, type BlockActionType } from '@/api/automation/types';
 import ConfirmActionModal from '@/components/chat/ConfirmActionModal.vue';
 import { TEMPLATE_VARIABLES } from '@/constants/template-variables';
@@ -1109,6 +1133,12 @@ const TRIGGER_ERROR_VN: Record<string, string> = {
   trigger_terminal_state: 'Mục tiêu đã huỷ/hoàn tất nên không sửa được. Hãy tạo Mục tiêu mới.',
   trigger_not_found: 'Không tìm thấy Mục tiêu.',
 };
+// Chèn biến từ bảng AliasVarPicker vào mẫu tên gợi nhớ (2026-06-19).
+function insertAliasVar(token: string): void {
+  const cur = form.value.aliasTemplate ?? '';
+  form.value.aliasTemplate = (cur && !cur.endsWith(' ') ? cur + ' ' : cur) + token;
+}
+
 function friendlyTriggerError(err: any): string {
   const code = err?.response?.data?.error as string | undefined;
   const hint = err?.response?.data?.hint as string | undefined;
@@ -1273,6 +1303,10 @@ const form = ref({
   // #1 2026-06-06 — 2 công tắc bám đuổi theo trạng thái kết bạn (Anh chốt).
   followUpStrangerEnabled: true,  // Bám đuổi cả khi KH CHƯA đồng ý KB (qua hộp người lạ)
   followUpFriendEnabled: true,    // Bám đuổi khi KH ĐÃ là bạn (chờ accept thật)
+  // Tự đặt tên gợi nhớ 2026-06-19 (Anh chốt) — đặt alias Zalo cho cả tệp khi có UID.
+  autoAliasEnabled: false,        // Bật = tự đặt tên gợi nhớ cho khách trong tệp
+  aliasTemplate: '{zalo_name} {trigger_project} {income} {phone}', // mẫu ghép (biến render-template)
+  projectAbbr: '',                // viết tắt dự án → biến {trigger_project}
   // Thông báo nội bộ TIN (welcome/thankYou/remind/rejected) = boolean owner per-trigger.
   // CareSession 2026-06-07: cấu hình LẮNG NGHE (event khách + điều kiện đóng) đã TÁCH
   // sang trang chung cấp tổ chức (/marketing/care-listen), KHÔNG còn trong wizard.
@@ -1810,6 +1844,10 @@ function buildSubmitPayload() {
     // #1 2026-06-06 — 2 công tắc bám đuổi theo trạng thái kết bạn.
     followUpStrangerEnabled: form.value.followUpStrangerEnabled,
     followUpFriendEnabled: form.value.followUpFriendEnabled,
+    // Tự đặt tên gợi nhớ 2026-06-19.
+    autoAliasEnabled: form.value.autoAliasEnabled,
+    aliasTemplate: form.value.aliasTemplate?.trim() || null,
+    projectAbbr: form.value.projectAbbr?.trim() || null,
     // notifyChannels: chỉ TIN (welcome/thankYou/remind/rejected) per-trigger.
     // Care event (reply/reaction/...) đã chuyển sang cấu hình LẮNG NGHE chung cấp org.
     notifyChannels: Object.fromEntries(
@@ -1959,6 +1997,10 @@ async function loadForEdit(triggerId: string): Promise<void> {
     // #1 2026-06-06 — 2 công tắc bám đuổi.
     if (typeof t.followUpStrangerEnabled === 'boolean') form.value.followUpStrangerEnabled = t.followUpStrangerEnabled;
     if (typeof t.followUpFriendEnabled === 'boolean') form.value.followUpFriendEnabled = t.followUpFriendEnabled;
+    // Tự đặt tên gợi nhớ 2026-06-19 — prefill.
+    if (typeof t.autoAliasEnabled === 'boolean') form.value.autoAliasEnabled = t.autoAliasEnabled;
+    if (typeof t.aliasTemplate === 'string') form.value.aliasTemplate = t.aliasTemplate;
+    if (typeof t.projectAbbr === 'string') form.value.projectAbbr = t.projectAbbr;
     if (t.notifyChannels && typeof t.notifyChannels === 'object') {
       const nc = t.notifyChannels as Record<string, { owner?: boolean }>;
       // Chỉ tin (welcome/thankYou/remind/rejected) — care event đã chuyển sang org-level.

@@ -57,7 +57,13 @@ export type EventType =
   // 2026-06-18 — bước bị BỎ QUA hẳn (không gửi): kịch bản tắt, khách nhiều nick, mới add gần đây.
   | 'sequence_step_skipped'
   // 2026-06-18 — nick hết lượt kết bạn trong ngày (friend-add cap).
-  | 'friend_quota_exhausted';
+  | 'friend_quota_exhausted'
+  // 2026-06-19 — tự đặt tên gợi nhớ (Zalo alias) cho KH trong trigger (đặt khi có UID).
+  | 'contact_alias_set'
+  // 2026-06-19 — quét tệp lúc activate: tổng hợp sẵn-sàng-gửi vs bỏ qua (vì sao) cho log tab.
+  | 'pool_scan'
+  // 2026-06-19 — vì sao LỜI MỜI chưa gửi (ngoài giờ / nick rớt / đang chờ nhịp gửi) — chống "treo".
+  | 'friend_invite_blocked';
 
 export interface LogEventInput {
   orgId: string;

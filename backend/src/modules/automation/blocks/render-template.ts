@@ -30,8 +30,13 @@ export interface TemplateVarValues {
   last_inbound: string; last_outbound: string; last_interaction: string; msg_count: string;
   // Per-nick (Friend)
   uid: string; nick_name: string; kb_status: string; became_friend: string;
+  // Tên Zalo THẬT của KH nhìn từ nick (Friend.zaloDisplayName) — KHÁC name/crm_* (tên import).
+  // Fallback RỖNG (không "Anh Chị") — dùng cho alias: trống thì không hiện gì (CEO chốt 2026-06-19).
+  zalo_name: string;
   // Sale
   sale: string; sale_full: string;
+  // Thời gian — {date} = NGÀY HÔM NAY (dd/mm/yyyy) lúc render. Dùng cho alias Lead Pool (Anh chốt 2026-06-19).
+  date: string;
 }
 
 const TOKEN_ORDER: Array<keyof TemplateVarValues> = [
@@ -40,8 +45,8 @@ const TOKEN_ORDER: Array<keyof TemplateVarValues> = [
   'age', 'occupation', 'province', 'district', 'ward', 'address', 'income',
   'status', 'nick_status', 'source', 'next_appt', 'score',
   'first_active', 'last_active', 'last_message', 'last_inbound', 'last_outbound', 'last_interaction', 'msg_count',
-  'uid', 'nick_name', 'kb_status', 'became_friend',
-  'sale', 'sale_full',
+  'uid', 'nick_name', 'kb_status', 'became_friend', 'zalo_name',
+  'sale', 'sale_full', 'date',
 ];
 
 const firstWord = (s: string) => s.trim().split(/\s+/)[0] ?? '';
@@ -79,6 +84,7 @@ async function resolveVars(contactId: string, assignedNickId: string): Promise<T
       where: { contactId, zaloAccountId: assignedNickId },
       select: {
         aliasInNick: true, zaloUidInNick: true, relationshipKind: true, becameFriendAt: true,
+        zaloDisplayName: true,
         totalInbound: true, totalOutbound: true, statusRef: { select: { name: true } },
       },
     }),
@@ -126,15 +132,30 @@ async function resolveVars(contactId: string, assignedNickId: string): Promise<T
     nick_name: nick?.displayName ?? '',
     kb_status: friend ? (KB_LABEL[friend.relationshipKind] ?? '') : '',
     became_friend: fmtDate(friend?.becameFriendAt),
+    zalo_name: (friend?.zaloDisplayName ?? '').trim(), // tên Zalo thật; rỗng nếu chưa có (KHÔNG fallback "Anh Chị")
     sale: lastWord(saleFull) || 'em',
     sale_full: saleFull || 'em',
+    date: fmtDate(new Date()), // ngày hôm nay dd/mm/yyyy
   };
 }
 
-/** Thay 8 token {key} bằng giá trị. Thứ tự cố định (TOKEN_ORDER) cho shiftStylesForRender khớp. */
-function applyVars(raw: string, v: TemplateVarValues): string {
+/**
+ * Thay token {key} bằng giá trị. Thứ tự cố định (TOKEN_ORDER) cho shiftStylesForRender khớp.
+ * extra: biến NGOÀI catalog (vd {trigger_project} cho alias) + có thể OVERRIDE biến chuẩn
+ * (vd {zalo_name} live từ findUser thắng giá trị DB). Áp sau TOKEN_ORDER, không đụng styles.
+ */
+function applyVars(raw: string, v: TemplateVarValues, extra?: Record<string, string>): string {
   let out = raw;
-  for (const k of TOKEN_ORDER) out = out.replaceAll(`{${k}}`, v[k]);
+  for (const k of TOKEN_ORDER) {
+    const val = extra && k in extra ? extra[k] : v[k];
+    out = out.replaceAll(`{${k}}`, val);
+  }
+  if (extra) {
+    for (const k of Object.keys(extra)) {
+      if ((TOKEN_ORDER as string[]).includes(k)) continue; // đã xử lý ở vòng trên
+      out = out.replaceAll(`{${k}}`, extra[k]);
+    }
+  }
   return out;
 }
 
@@ -148,10 +169,11 @@ export async function renderTemplate(
   raw: string,
   contactId: string,
   assignedNickId: string,
+  extraVars?: Record<string, string>,
 ): Promise<string> {
   if (!raw.includes('{')) return raw;
   const v = await resolveVars(contactId, assignedNickId);
-  return applyVars(raw, v);
+  return applyVars(raw, v, extraVars);
 }
 
 /**

@@ -159,6 +159,14 @@ export async function materializeFromEvent(
       ...DEFAULT_RUNTIME_RULES,
       ...(trigger.sequence.runtimeRules as object),
       ...((trigger.ruleOverrides as object) ?? {}),
+      // Tự đặt tên gợi nhớ 2026-06-19 — đẩy config trigger xuống handler request_friend
+      // (đặt alias ngay khi có UID). triggerId kèm để logEvent('contact_alias_set').
+      aliasCfg: {
+        enabled: trigger.autoAliasEnabled,
+        template: trigger.aliasTemplate ?? '',
+        project: trigger.projectAbbr ?? '',
+        triggerId: trigger.id,
+      },
     };
 
     // 5. Find or create active campaign for this trigger + sequence
