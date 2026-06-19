@@ -214,7 +214,7 @@ const grouped = computed(() => {
 </script>
 
 <style scoped>
-@import '@/components/automation/phase7/airtable.css';
+@import '@/assets/airtable.css';
 
 .apt-list {
   padding: var(--at-s-md) var(--at-s-xl) var(--at-s-lg);

@@ -652,7 +652,7 @@ class ZaloAccountPool {
       // Import động tránh import vòng zalo-pool ↔ nick-worker. Fire-and-forget, idempotent
       // (startNickWorker skip nếu đã có worker / chỉ spawn nếu nick gắn trigger active).
       if (status === 'connected') {
-        void import('../automation/friend-invite/nick-worker.js')
+        void import('../../shared/ee-registry/automation.js')
           .then((m) => m.respawnNickWorkerIfActive(accountId, updated.orgId))
           .catch((err) =>
             logger.warn(`[zalo:${accountId}] respawn nick-worker on connect failed: ${String(err)}`),

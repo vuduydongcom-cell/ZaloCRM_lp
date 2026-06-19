@@ -252,7 +252,7 @@ function fmtTime(a: Appointment): string {
 </script>
 
 <style scoped>
-@import '@/components/automation/phase7/airtable.css';
+@import '@/assets/airtable.css';
 
 .apt-sidebar {
   background: var(--at-surface-soft);

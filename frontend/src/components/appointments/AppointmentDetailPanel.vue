@@ -222,7 +222,7 @@ function formatRelative(iso: string): string {
 </script>
 
 <style scoped>
-@import '@/components/automation/phase7/airtable.css';
+@import '@/assets/airtable.css';
 
 /* Desktop: inline panel = 3rd grid column trong apt-body. Không fixed/overlay. */
 .apt-panel {

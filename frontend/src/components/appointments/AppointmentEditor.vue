@@ -1056,7 +1056,7 @@ if (typeof window !== 'undefined') {
 </script>
 
 <style scoped>
-@import '@/components/automation/phase7/airtable.css';
+@import '@/assets/airtable.css';
 
 /* FIX 2026-06-09 (Anh báo bể UI): 2 token --at-coral-tint / --at-coral-text KHÔNG
    được định nghĩa trong airtable.css → render rỗng → hàng KH liên kết (.linked-kh-row)

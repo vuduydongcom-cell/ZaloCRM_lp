@@ -471,7 +471,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-@import '@/components/automation/phase7/airtable.css';
+@import '@/assets/airtable.css';
 
 /* Page shell — Airtable design */
 .apt-page {

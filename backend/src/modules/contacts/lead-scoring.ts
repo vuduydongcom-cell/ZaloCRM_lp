@@ -7,7 +7,7 @@
  */
 import { prisma } from '../../shared/database/prisma-client.js';
 import { logger } from '../../shared/utils/logger.js';
-import { emitLeadScoreThresholdIfCrossed } from '../automation/engine/lead-score-threshold-hook.js';
+import { emitLeadScoreThresholdIfCrossed } from '../../shared/ee-registry/automation.js';
 import { withTenant, runSystemQuery } from '../../shared/tenant/tenant-context.js';
 
 export async function computeLeadScore(contactId: string): Promise<number> {

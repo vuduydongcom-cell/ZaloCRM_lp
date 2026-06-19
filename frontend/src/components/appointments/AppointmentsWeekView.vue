@@ -283,7 +283,7 @@ function onSlotClick(date: Date, hour: number, minute: number) {
 </script>
 
 <style scoped>
-@import '@/components/automation/phase7/airtable.css';
+@import '@/assets/airtable.css';
 
 .apt-week {
   display: grid; grid-template-rows: auto 1fr;

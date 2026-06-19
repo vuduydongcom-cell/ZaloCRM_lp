@@ -200,7 +200,7 @@ import {
 } from '@/api/media';
 import type { Contact } from '@/composables/use-contacts';
 import { useToast } from '@/composables/use-toast';
-import AutomationBlocksPanel from './AutomationBlocksPanel.vue';
+import AutomationBlocksPanel from '@ee/automation/chat-blocks/AutomationBlocksPanel.vue';
 import MediaReviewDialog from '@/components/media/MediaReviewDialog.vue';
 import {
   Image as ImageIcon,
