@@ -60,9 +60,9 @@ Giống bản EE nhưng **bỏ qua nhóm Facebook/automation** (không có trong
 |---|---|
 | `JWT_SECRET`, `ENCRYPTION_KEY` | `openssl rand -hex 32` mỗi cái |
 | `DB_PASSWORD` | mật khẩu Postgres mạnh (KHỚP trong `DATABASE_URL`) |
-| `APP_URL`, `CRM_LOGIN_URL` | domain prod, vd `https://oss.locnguyendata.com` |
+| `APP_URL`, `CRM_LOGIN_URL` | domain prod, vd `https://sub.domain.com` |
 | `MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` | đổi khác `minioadmin`; `S3_ACCESS_KEY`/`S3_SECRET_KEY` khớp tương ứng |
-| `S3_PUBLIC_URL` | URL HTTPS công khai tới MinIO, vd `https://fileoss.locnguyendata.com` (xem §5) |
+| `S3_PUBLIC_URL` | URL HTTPS công khai tới MinIO, vd `https://file.domain.com` (xem §5) |
 | `ANTHROPIC_AUTH_TOKEN` … | tuỳ chọn, nếu dùng AI |
 
 **Không cần** (an toàn nếu bỏ trống/không có): `TOKEN_ENCRYPTION_KEY`, `FB_*` — chỉ liên quan
@@ -129,8 +129,8 @@ Tunnel token (dashboard-managed) → vào **Zero Trust → Networks → Tunnels 
 
 | Public hostname | Service |
 |---|---|
-| `oss.locnguyendata.com` | `http://localhost:3080` |
-| `fileoss.locnguyendata.com` | `http://localhost:9000` |
+| `sub.domain.com` | `http://localhost:3080` |
+| `file.domain.com` | `http://localhost:9000` |
 
 - #1 = app (WebSocket tự đi qua). #2 = MinIO cho `S3_PUBLIC_URL`. Bỏ #2 thì ảnh/sticker/logo
   trong chat không hiển thị.
@@ -139,8 +139,8 @@ Tunnel token (dashboard-managed) → vào **Zero Trust → Networks → Tunnels 
 
 Kiểm tra:
 ```bash
-curl -s -o /dev/null -w "%{http_code}\n" https://oss.locnguyendata.com/                 # 200
-curl -sI https://fileoss.locnguyendata.com/minio/health/live | head -1                  # 200
+curl -s -o /dev/null -w "%{http_code}\n" https://sub.domain.com/                 # 200
+curl -sI https://file.domain.com/minio/health/live | head -1                  # 200
 ```
 (App đã `trustProxy: true` → cookie `Secure` + `wss://` chạy đúng sau tunnel.)
 
@@ -150,9 +150,9 @@ curl -sI https://fileoss.locnguyendata.com/minio/health/live | head -1          
 
 ## 6. Tạo tài khoản chủ (owner) lần đầu
 
-Mở `https://oss.locnguyendata.com` → trang **/setup** tự hiện → tạo tổ chức + owner. Kiểm tra:
+Mở `https://sub.domain.com` → trang **/setup** tự hiện → tạo tổ chức + owner. Kiểm tra:
 ```bash
-curl -s https://oss.locnguyendata.com/api/v1/setup/status   # {"needsSetup":false} sau khi tạo
+curl -s https://sub.domain.com/api/v1/setup/status   # {"needsSetup":false} sau khi tạo
 ```
 Sau đó **Cài đặt → Tài khoản Zalo → Thêm nick → quét QR** (KHÔNG mở Zalo Web cùng lúc).
 
@@ -166,17 +166,53 @@ theo §4(d). Muốn ẩn hợp pháp → mua commercial license và điền key 
 
 ---
 
-## 8. Nâng cấp bản Community đang chạy
+## 8. Nâng cấp bản Community đang chạy (từ bản cũ → bản mới)
+
+> **Idempotent + GIỮ dữ liệu.** Chi tiết bảo mật từng biến: runbook gốc
+> [`HUONG-DAN-TRIEN-KHAI-PRODUCTION.md`](./HUONG-DAN-TRIEN-KHAI-PRODUCTION.md).
+
+**Có gì mới ở bản này:** telegram-bridge (core — có ở Community), sequence delay/jitter, fix lead-pool
+*(chỉ ảnh hưởng bản EE)*, clamav tag `1.4`. **Migration mới** (additive): `telegram_bridge_phase0`,
+`sequence_step_jitter`. **Biến `.env` mới (tuỳ chọn):** `TELEGRAM_BRIDGE_BOT_TOKEN` (trống = cầu Telegram TẮT).
 
 ```bash
-docker exec zalo-crm-db pg_dump -U crmuser zalocrm > backup-$(date +%F-%H%M).sql
-git pull                                  # hoặc lấy mirror Community mới (sinh lại từ EE)
+# B1 — BACKUP DB trước (bắt buộc)
+docker exec zalo-crm-db pg_dump -U crmuser zalocrm > backup-truoc-nang-cap-$(date +%F-%H%M).sql
+
+# B2 — Lấy code Community mới (clone mirror mới, hoặc sinh lại từ EE bằng make-community)
+git pull
+
+# B3 — Kiểm .env: GIỮ NGUYÊN JWT_SECRET / ENCRYPTION_KEY / DB_PASSWORD / MinIO (đổi = mất phiên/dữ liệu)
+
+# B4 — Build lại, GIỮ DB (KHÔNG -v)
 docker compose up -d --build app
+
+# B5 — Migrate (BẮT BUỘC — LUÔN deploy, KHÔNG "migrate dev")
 docker exec zalo-crm-app npx prisma migrate deploy
+
+# B6 — Cutover: ép re-login 1 lần
+docker exec zalo-crm-db psql -U crmuser -d zalocrm -c "UPDATE users SET jwt_token_version = jwt_token_version + 1;"
 docker compose restart app
 ```
+
+> 🛑 **CHỈ `up -d --build app`, KHÔNG `down -v`** (down -v xoá DB → mất tài khoản → đăng nhập lại bị
+> đá về `/setup-password`). Kiểm tra sau nâng cấp: `curl ... :3080/` → 200; `grep "community edition"`
+> trong log; `SELECT count(*) FROM users` > 0.
+
+**Chuyển từ bản cũ/EE → Community (lưu ý dữ liệu):** schema giống hệt nên DB của 4 nhóm tính năng EE
+(Lead Pool, Automation/Marketing, Facebook) **vẫn nằm nguyên trong các bảng "ngủ"** — vô hại, KHÔNG mất.
+UI/route các tính năng đó biến mất ở Community. **Có thể đảo ngược**: deploy lại image EE (còn `_ee/`)
+là các tính năng + dữ liệu hiện lại đầy đủ.
+
 > Quy trình open-core: fix/feature ngoài `_ee/` ở repo Extension **tự động** chảy vào Community
 > ở lần `make-community` kế tiếp — không cherry-pick. Đừng merge ngược Community → Extension.
+
+### Rollback
+```bash
+git checkout <branch-hoặc-commit-cũ> && docker compose up -d --build app
+# Migration additive → thường không cần rollback DB. Nếu cần:
+cat backup-truoc-nang-cap-*.sql | docker exec -i zalo-crm-db psql -U crmuser zalocrm
+```
 
 ---
 
