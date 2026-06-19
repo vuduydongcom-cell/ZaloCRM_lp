@@ -417,6 +417,8 @@ model ZaloAccount {
   sdkLimits                        SdkLimit[]
   // 2026-06-15 — ảnh kho lưu từ chat của nick này (để hiện "ảnh từ nick nào").
   mediaAssetsAsSource              MediaAsset[]            @relation("MediaAssetSourceNick")
+  // 2026-06-18 — Cầu Zalo↔Telegram: cấu hình cầu per-nick (1 nick = 1 supergroup).
+  telegramBridge                   TelegramBridgeConfig?
 
   @@map("zalo_accounts")
 }
@@ -768,6 +770,8 @@ model Conversation {
   messages      Message[]
   aiSuggestions AiSuggestion[]
   pins          PinnedConversation[]
+  // 2026-06-18 — Cầu Telegram: 1 hội thoại = 1 forum topic (định tuyến reply).
+  telegramTopic TelegramTopicMap?
 
   @@unique([zaloAccountId, externalThreadId])
   @@index([orgId, zaloAccountId, isReplied, lastMessageAt])
@@ -866,6 +870,41 @@ model Message {
   @@index([automationTaskId, sentAt])
   @@index([sentVia, conversationId])
   @@map("messages")
+}
+
+// ── Cầu Zalo ↔ Telegram (2026-06-18) ──────────────────────────────────────────
+// 1 nick = 1 cấu hình cầu = 1 supergroup Telegram. enabled=false tới khi owner bật.
+// telegramChatId NULL tới khi tài khoản công ty provision xong group (Phase 3).
+// Chống lặp KHÔNG dùng cột source: khử trùng selfListen echo theo zaloMsgId (Phase 2).
+model TelegramBridgeConfig {
+  id             String   @id @default(uuid())
+  orgId          String   @map("org_id")
+  zaloAccountId  String   @unique @map("zalo_account_id") // 1 nick = 1 config
+  telegramChatId String?  @map("telegram_chat_id") // supergroup id (set khi provision)
+  enabled        Boolean  @default(false)
+  createdAt      DateTime @default(now()) @map("created_at")
+  updatedAt      DateTime @updatedAt @map("updated_at")
+
+  zaloAccount ZaloAccount @relation(fields: [zaloAccountId], references: [id], onDelete: Cascade)
+
+  @@index([orgId, enabled])
+  @@map("telegram_bridge_config")
+}
+
+// 1 hội thoại (KH) = 1 forum topic trong supergroup của nick — định tuyến reply 2 chiều.
+model TelegramTopicMap {
+  id              String   @id @default(uuid())
+  conversationId  String   @unique @map("conversation_id")
+  telegramChatId  String   @map("telegram_chat_id") // supergroup chứa topic
+  telegramTopicId Int      @map("telegram_topic_id") // forum topic id (message_thread_id)
+  // Cho chính sách đóng topic im lặng > N ngày khi đụng trần ~1000 topic/supergroup.
+  lastActiveAt    DateTime @default(now()) @map("last_active_at")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([telegramChatId, lastActiveAt])
+  @@map("telegram_topic_map")
 }
 
 // Phase metrics layer 2026-05-22 — Phone search event log.
@@ -3229,6 +3268,9 @@ model LeadPoolConfig {
   //   {ten_em}    — tên riêng sale (từ cuối fullName)
   // Empty array → service fallback default 3 câu hardcode. Admin PATCH config để thêm/sửa.
   greetingTemplates      Json    @default("[]") @map("greeting_templates")
+  // 2026-06-19 (D) — Pool chỉ lấy lead từ các tệp KH (CustomerList) này. Rỗng = mọi tệp
+  // shareable_to_pool=true (hành vi cũ). Chỉ áp khi nguồn 'customer_list' đang bật.
+  sourceListIds          Json    @default("[]") @map("source_list_ids")
 
   createdAt DateTime @default(now()) @map("created_at")
   updatedAt DateTime @updatedAt @map("updated_at")
