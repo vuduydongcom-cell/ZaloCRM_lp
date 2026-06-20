@@ -371,10 +371,12 @@ export async function zaloRoutes(app: FastifyInstance): Promise<void> {
             disconnectReason: existing.disconnectReason ?? null, // T1: FE phân biệt manual/passive
             archived: isArchived,                                 // T1: boolean (KHÔNG trả raw Date)
           };
-          // T9b: nick ĐÃ XÓA của CHÍNH MÌNH + khớp theo UID (định danh thật) → FE login QR THẲNG
-          // trên id cũ (POST /:id/login) → revive đúng record (T8 clear archivedAt), KHÔNG tạo mới.
+          // T9b + 2026-06-21: nick CỦA CHÍNH MÌNH + khớp theo UID (định danh thật) mà KHÔNG đang
+          // 'connected' (đã xóa / disconnected / qr_pending / manual) → FE login QR THẲNG trên id
+          // cũ (POST /:id/login) → revive đúng record cũ, KHÔNG tạo nick mới (giữ uid + tin nhắn).
+          // Trước chỉ archived → nick disconnected (session chết) rơi vào reconnect ngầm báo ảo.
           // KHÔNG revive theo phone-only (uid rỗng = bản ma/khác người dùng cũ số đó).
-          if (isArchived && ownedByMe && !!foundUid && existing.zaloUid === foundUid) {
+          if (ownedByMe && !!foundUid && existing.zaloUid === foundUid && existing.status !== 'connected') {
             reviveAccountId = existing.id;
           }
         }
@@ -434,6 +436,71 @@ export async function zaloRoutes(app: FastifyInstance): Promise<void> {
       });
 
       return { message: 'Proxy updated', hasProxy: !!proxyUrl };
+    },
+  );
+
+  // PUT /api/v1/zalo-accounts/:id/phone — sửa SĐT THỦ CÔNG cho nick (anh hỏi 2026-06-21:
+  // nick nhập trước chưa xác minh SĐT → bổ sung sau). Verify trùng Zalo/tên trước khi lưu:
+  //   • khớp UID (nick đã login + uid của SĐT trùng) HOẶC khớp TÊN → lưu (đã xác minh).
+  //   • lookup được nhưng KHÁC uid/tên, hoặc số chưa có Zalo, hoặc không tra được → 409 needsConfirm
+  //     (cảnh báo); chỉ lưu khi body.force=true. Để trống phone → xóa SĐT (cho luôn).
+  app.put<{ Params: { id: string }; Body: { phone?: string; force?: boolean } }>(
+    '/api/v1/zalo-accounts/:id/phone',
+    async (request, reply) => {
+      const { id } = request.params;
+      const gate = await requireAccountManagement(request, reply, id);
+      if (!gate) return reply;
+
+      const force = request.body?.force === true;
+      const phone = (request.body?.phone ?? '').trim().replace(/[\s.\-()]/g, '');
+      if (!phone) {
+        await prisma.zaloAccount.update({ where: { id }, data: { phone: null } });
+        return { saved: true, message: 'Đã xóa SĐT.' };
+      }
+      if (!/^(0|\+?84)\d{8,10}$/.test(phone)) {
+        return reply.status(400).send({ error: 'invalid_phone', message: 'Số điện thoại không hợp lệ.' });
+      }
+
+      const nick = await prisma.zaloAccount.findUnique({
+        where: { id }, select: { zaloUid: true, displayName: true, orgId: true },
+      });
+      if (!nick) return reply.status(404).send({ error: 'not_found' });
+
+      // Tra SĐT trên Zalo qua nick hệ thống (như check-phone) để xác minh danh tính.
+      let resolved: { uid: string | null; name: string | null } | null = null;
+      try {
+        const org = await prisma.organization.findUnique({
+          where: { id: nick.orgId },
+          select: { systemNotifyNick: { select: { id: true, status: true } } },
+        });
+        const sysNick = org?.systemNotifyNick;
+        if (sysNick && sysNick.status === 'connected') {
+          const { zaloOps } = await import('../../shared/zalo-operations.js');
+          const found = (await zaloOps.findUser(sysNick.id, phone)) as { uid?: string; display_name?: string; zalo_name?: string; username?: string } | null;
+          resolved = found?.uid
+            ? { uid: String(found.uid), name: found.display_name ?? found.zalo_name ?? found.username ?? null }
+            : { uid: null, name: null };
+        }
+      } catch { /* lookup lỗi → resolved=null (không xác minh được) */ }
+
+      const norm = (s: string | null) => (s ?? '').trim().toLowerCase();
+      const uidMatch = !!resolved?.uid && !!nick.zaloUid && resolved.uid === nick.zaloUid;
+      const nameMatch = !!resolved?.name && norm(resolved.name) === norm(nick.displayName);
+
+      if (uidMatch || nameMatch) {
+        await prisma.zaloAccount.update({ where: { id }, data: { phone } });
+        return { saved: true, verified: true, matchedBy: uidMatch ? 'uid' : 'name', message: 'Đã lưu SĐT (khớp Zalo).' };
+      }
+      if (!force) {
+        const why = resolved === null
+          ? 'Không tra được Zalo (nick hệ thống chưa kết nối) để xác minh.'
+          : resolved.uid === null
+            ? 'Số này CHƯA đăng ký Zalo.'
+            : `Số này trên Zalo là "${resolved.name ?? 'người khác'}" — KHÁC tên nick "${nick.displayName ?? ''}".`;
+        return reply.status(409).send({ saved: false, needsConfirm: true, resolved, message: why });
+      }
+      await prisma.zaloAccount.update({ where: { id }, data: { phone } });
+      return { saved: true, verified: false, message: 'Đã lưu SĐT (chưa xác minh).' };
     },
   );
 }
