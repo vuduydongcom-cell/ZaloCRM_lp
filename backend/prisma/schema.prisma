@@ -512,6 +512,13 @@ model Contact {
   // Dùng làm khóa dedup chính: cùng person từ 2 account CRM khác nhau có cùng zaloGlobalId.
   zaloGlobalId     String?   @map("zalo_global_id")
   zaloUsername     String?   @map("zalo_username")
+  // Đợt 2b 2026-06-22 — hồ sơ Zalo mở rộng từ getUserInfo (verify raw runtime, KHÔNG đoán):
+  // status=trạng thái/bio, cover=ảnh bìa, isExtensionAccount=cờ KH doanh nghiệp, lastActionTime
+  // =hoạt động cuối. Fill chủ yếu qua message-handler (KH nhắn → getUserInfo). lastActive dùng GREATEST.
+  zaloStatus       String?   @map("zalo_status")
+  zaloCoverUrl     String?   @map("zalo_cover_url")
+  isBusinessAccount Boolean? @map("is_business_account")
+  zaloLastActiveAt DateTime? @map("zalo_last_active_at")
   phone            String?
   // Canonical SĐT (84xxx no +/space) — auto-derive từ `phone` qua normalizePhone()
   // trên mọi write path. Index để search exact O(log n), dedup chính xác cross-format

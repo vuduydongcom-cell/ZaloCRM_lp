@@ -32,12 +32,35 @@ export interface NormalizedZaloProfile {
   sdob?: unknown;            // 'DD/MM/YYYY' | 'YYYY-MM-DD'
   dob?: unknown;             // timestamp giây/ms
   phoneNumber?: string | null; // SĐT công khai (chỉ có khi KH bật công khai)
+  // Đợt 2b (verify raw 2026-06-22) — chỉ getUserInfo trả; getAllFriends/findUser thường không.
+  status?: string | null;        // trạng thái/bio Zalo (profile.status)
+  cover?: string | null;         // ảnh bìa (profile.cover)
+  isExtensionAccount?: unknown;  // cờ KH doanh nghiệp (raw — coerce ở capture; bizPkg là object, KHÔNG dùng)
+  lastActionTime?: unknown;       // timestamp hoạt động cuối (number)
 }
 
 const pick = (v: unknown): string | null => {
   const s = String(v ?? '').trim();
   return s || null;
 };
+
+// Đợt 2b — 4 field mở rộng (chỉ getUserInfo trả; getAllFriends/findUser thường absent → null/undefined).
+const extra2b = (p: Record<string, unknown>) => ({
+  status: pick(p.status),
+  cover: pick(p.cover),
+  isExtensionAccount: p.isExtensionAccount,
+  lastActionTime: p.lastActionTime,
+});
+
+/** Timestamp Zalo (giây hoặc ms) → Date. Loại giá trị rác (ngoài 2010-2100). */
+function parseZaloTs(v: unknown): Date | null {
+  const n = Number(v ?? 0);
+  if (!n || !Number.isFinite(n)) return null;
+  const ms = n > 1e11 ? n : n * 1000; // >1e11 ⇒ đã là ms; nhỏ hơn ⇒ giây
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  return y >= 2010 && y <= 2100 ? d : null;
+}
 
 // ── 3 ADAPTER: unwrap shape SDK → NormalizedZaloProfile ─────────────────────
 
@@ -55,6 +78,7 @@ export function fromGetUserInfo(result: unknown, uid: string): NormalizedZaloPro
     gender: p.gender ?? null,
     sdob: p.sdob ?? null, dob: p.dob ?? null,
     phoneNumber: pick(p.phoneNumber),
+    ...extra2b(p),
   };
 }
 
@@ -71,6 +95,7 @@ export function fromGetAllFriends(raw: Record<string, unknown>): NormalizedZaloP
     gender: raw.gender ?? null,
     sdob: raw.sdob ?? null, dob: raw.dob ?? null,
     phoneNumber: pick(raw.phoneNumber),
+    ...extra2b(raw),
   };
 }
 
@@ -88,6 +113,7 @@ export function fromFindUser(raw: unknown): NormalizedZaloProfile | null {
     gender: p.gender ?? null,
     sdob: p.sdob ?? null, dob: p.dob ?? null,    // findUser thường ko có dob → null
     phoneNumber: pick(p.phoneNumber),
+    ...extra2b(p),
   };
 }
 
@@ -185,6 +211,7 @@ export async function captureZaloProfile(
       select: {
         gender: true, genderLocked: true, birthDate: true,
         phone: true, phone2: true, phone3: true, phonesExtra: true, metadata: true,
+        zaloStatus: true, zaloCoverUrl: true, isBusinessAccount: true, zaloLastActiveAt: true,
       },
     });
     if (!c) return;
@@ -194,6 +221,18 @@ export async function captureZaloProfile(
       const bd = parseBirthDate(p.sdob, p.dob);
       if (bd) { data.birthDate = bd; data.birthYear = bd.getUTCFullYear(); }
     }
+
+    // Đợt 2b — 4 field mở rộng (getUserInfo). status=mới-nhất (bio đổi theo thời gian); cover/business
+    // =fill-khi-trống; lastActive=GREATEST (luôn giữ mốc mới nhất). Coerce business an toàn (bizPkg là object).
+    if (p.status && p.status !== c.zaloStatus) data.zaloStatus = p.status;
+    if (p.cover && !c.zaloCoverUrl) data.zaloCoverUrl = p.cover;
+    if (c.isBusinessAccount == null) {
+      const b = p.isExtensionAccount;
+      const bv = (b === true || b === 1) ? true : (b === false || b === 0) ? false : null;
+      if (bv !== null) data.isBusinessAccount = bv;
+    }
+    const la = parseZaloTs(p.lastActionTime);
+    if (la && (!c.zaloLastActiveAt || la > c.zaloLastActiveAt)) data.zaloLastActiveAt = la;
 
     // 3b. SĐT công khai → phone/phone2/phone3/phonesExtra (helper chung, dùng lại ở friend-sync).
     Object.assign(data, buildPhoneCapturePatch(c, p.phoneNumber));
