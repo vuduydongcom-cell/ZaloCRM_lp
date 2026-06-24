@@ -429,7 +429,7 @@ Tham gia nhóm Telegram để trao đổi, hỏi đáp, nhận thông báo bản
 
 <p align="left">
   <a href="https://t.me/+KKJ3SJSx6PA3NDE1">
-    <img src="docs/user-guide-images/qr-group-telegram.png" alt="Telegram Group QR" width="200" />
+    <img src="docs/release-images/qr-group-telegram.png" alt="Telegram Group QR" width="200" />
   </a>
 </p>
 
